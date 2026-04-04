@@ -6,6 +6,7 @@
 
 - When a child `llmQuery` hits `maxTurns`, RLM now restores the child state internally and runs a final no-tools pass before returning, reducing empty child results.
 - README is now more usage-focused and keeps advanced runtime details lower in the document.
+- Replaced the old smoke script with a real Pi CLI integration smoke test.
 
 ### Fixed
 
