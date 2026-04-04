@@ -121,6 +121,16 @@ export function parseChildResult(text: string, input: NormalizedLlmQueryRequest,
 		}
 	}
 
+	if (!trimmed) {
+		return {
+			ok: false,
+			answer: "",
+			role: input.role,
+			usage: { turns },
+			error: "Child returned empty output",
+		};
+	}
+
 	return {
 		ok: true,
 		answer: trimmed,

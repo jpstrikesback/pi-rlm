@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { composeRuntimeSnapshot, findBootstrapSnapshot, findLatestSnapshot, findLatestWorkspace, getSessionRuntimeKey, RLM_WORKSPACE_TYPE } from "../src/restore.js";
+import {
+	buildChildHandoffFromBranch,
+	composeRuntimeSnapshot,
+	findBootstrapSnapshot,
+	findLatestSnapshot,
+	findLatestSnapshotInBranch,
+	findLatestWorkspace,
+	findLatestWorkspaceInBranch,
+	getSessionRuntimeKey,
+	RLM_RUNTIME_TYPE,
+	RLM_WORKSPACE_TYPE,
+} from "../src/restore.js";
 import type { RuntimeSnapshot } from "../src/types.js";
 
 function makeCtx(sessionId: string, branch: unknown[]) {
@@ -51,12 +62,12 @@ describe("restore helpers", () => {
 		const ctx = makeCtx("session-1", [
 			{
 				type: "custom",
-				customType: "rlm-runtime",
+				customType: RLM_RUNTIME_TYPE,
 				data: { snapshot: snapshotA },
 			},
 			{
 				type: "custom",
-				customType: "rlm-runtime",
+				customType: RLM_RUNTIME_TYPE,
 				data: { snapshot: snapshotB },
 			},
 		]);
@@ -73,6 +84,17 @@ describe("restore helpers", () => {
 		]);
 
 		expect(findLatestSnapshot(ctx)).toBeUndefined();
+	});
+
+	it("supports branch-level snapshot and workspace lookup", () => {
+		const branch = [
+			{ type: "custom", customType: RLM_RUNTIME_TYPE, data: { snapshot: snapshotA } },
+			{ type: "custom", customType: RLM_WORKSPACE_TYPE, data: { workspace: { goal: "a" } } },
+			{ type: "custom", customType: RLM_RUNTIME_TYPE, data: { snapshot: snapshotB } },
+		];
+
+		expect(findLatestSnapshotInBranch(branch)).toEqual(snapshotB);
+		expect(findLatestWorkspaceInBranch(branch)).toEqual({ goal: "a" });
 	});
 
 	it("finds the latest persisted workspace entry", () => {
@@ -174,5 +196,36 @@ describe("restore helpers", () => {
 	it("returns undefined when no child bootstrap entry exists", () => {
 		const ctx = makeCtx("session-1", []);
 		expect(findBootstrapSnapshot(ctx)).toBeUndefined();
+	});
+
+	it("builds a child handoff from the latest child branch state", () => {
+		const branch = [
+			{ type: "custom", customType: RLM_RUNTIME_TYPE, data: { snapshot: snapshotA } },
+			{ type: "custom", customType: RLM_WORKSPACE_TYPE, data: { workspace: { goal: "refactor", done: ["scan"] } } },
+			{ type: "message", message: { role: "toolResult", toolName: "rlm_exec", details: { snapshot: snapshotB } } },
+		];
+
+		expect(
+			buildChildHandoffFromBranch(branch, {
+				childId: "child-1",
+				role: "worker",
+				depth: 1,
+				turns: 4,
+				reason: "budget_exhausted",
+				summary: "Scanned target files",
+				suggestedNextPrompt: "Continue from checkpoint",
+			}),
+		).toEqual({
+			version: 1,
+			childId: "child-1",
+			role: "worker",
+			depth: 1,
+			turns: 4,
+			reason: "budget_exhausted",
+			snapshot: snapshotB,
+			workspace: { goal: "refactor", done: ["scan"] },
+			summary: "Scanned target files",
+			suggestedNextPrompt: "Continue from checkpoint",
+		});
 	});
 });

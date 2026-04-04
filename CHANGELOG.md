@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- When a child `llmQuery` hits `maxTurns`, RLM now restores the child state internally and runs a final no-tools pass before returning, reducing empty child results.
+- README is now more usage-focused and keeps advanced runtime details lower in the document.
+
+### Fixed
+
+- Child queries that exhausted their turn budget are less likely to return ambiguous empty output.
+
 ## [0.1.2] - 2026-04-04
 
 ### Added

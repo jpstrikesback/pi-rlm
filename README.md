@@ -64,100 +64,21 @@ When RLM is on you get a pink **RLM MODE** widget (with mode label) and footer s
 
 ## Why RLM?
 
-Large refactors need more room for context than a single chat transcript. A normal agent loop is fine for small edits; it is weaker at keeping a **changing working set** coherent across many steps.
+Large refactors need more room for context than a single chat transcript. This extension gives the model a persistent workspace to keep intermediate state, recurse with `llmQuery`, and avoid re-deriving the same context over and over.
 
-This extension gives the model a place to:
+## Tools
 
-- hold intermediate state
-- build buffers and summaries
-- recurse on subproblems with `llmQuery`
-- keep derived data out of prose
-- resume without re-deriving everything
+- `rlm_exec` — run JS in the persistent runtime
+- `rlm_inspect` — inspect runtime globals
+- `rlm_reset` — clear the runtime
 
-## Why Pi?
-
-Pi already provides tools, sessions, forks, restore, slash commands, and UI hooks — so the runtime plugs in as an extension instead of a separate shell.
-
-## `llmQuery` API
-
-Recursive calls run inside a real Pi child session, so the request is one structured object:
-
-- **`prompt`** — child task (required)
-- **`state`** — structured parent → child payload (also surfaced as `globalThis.input` / `globalThis.parentState`)
-- **`tools`** — `"read-only"` | `"coding"` | `"same"` | explicit built-in list
-- **`budget`** — `"low"` | `"medium"` | `"high"` or `{ maxDepth?, maxTurns? }`
-- **`output`** — `{ mode?: "text" | "json", schema?: Record<string, string> }`
-
-Example:
-
-```ts
-await llmQuery({
-	prompt: "Analyze the auth module",
-	state: {
-		files: globalThis.authFiles,
-		previousSummary: globalThis.authSummary,
-	},
-	tools: "read-only",
-	budget: "medium",
-	output: {
-		mode: "json",
-		schema: {
-			summary: "string",
-			relevantFiles: "string[]",
-			findings: "string[]",
-		},
-	},
-});
-```
-
-### Types (exported from the package)
-
-```ts
-type LlmQueryRequest = {
-	prompt: string;
-	role?: "general" | "scout" | "planner" | "worker" | "reviewer";
-	state?: Record<string, unknown>;
-	tools?: "read-only" | "coding" | "same" | Array<"read" | "bash" | "edit" | "write" | "grep" | "find" | "ls">;
-	budget?: "low" | "medium" | "high" | { maxDepth?: number; maxTurns?: number };
-	output?: { mode?: "text" | "json"; schema?: Record<string, string> };
-};
-
-type LlmQueryResult = {
-	ok: boolean;
-	answer: string;
-	summary?: string;
-	data?: Record<string, unknown>;
-	role?: LlmQueryRole;
-	usage?: { turns?: number };
-	error?: string;
-};
-```
-
-With `output.mode === "json"`, parsed JSON is in `result.data`.
-
-## Tools exposed to the model
-
-| Tool          | Role                                               |
-| ------------- | -------------------------------------------------- |
-| `rlm_exec`    | Run JS in the persistent VM; `llmQuery` lives here |
-| `rlm_inspect` | Inspect `globalThis` / runtime table               |
-| `rlm_reset`   | Clear the runtime                                  |
-
-Inside `rlm_exec`:
+Inside `rlm_exec` you can use:
 
 - `inspectGlobals()`
-- `final(value)` — return a structured “result” for the tool
+- `final(value)`
 - `await llmQuery(request)`
 
-## Runtime model
-
-- One `worker_threads` VM per Pi session key
-- State is snapshotted as structured-cloneable globals
-- Snapshots restore on session restore, tree navigation, and fork
-- `globalThis.workspace` is also persisted as a dedicated branch-aware custom entry so it survives resume, `/tree`, and `/fork` as the durable coordination root
-- Child bootstrap uses `globalThis.input` / `globalThis.parentState`
-
-## Programmatic default export
+## Use in an extension
 
 ```ts
 import rlmExtension from "pi-turtle-rlm";
@@ -165,7 +86,7 @@ import rlmExtension from "pi-turtle-rlm";
 export default rlmExtension;
 ```
 
-Factory with options:
+Or configure defaults:
 
 ```ts
 import { createRlmExtension } from "pi-turtle-rlm";
@@ -176,11 +97,26 @@ export default createRlmExtension({
 });
 ```
 
-Exported types include `RlmExtensionOptions`, `LlmQueryRequest`, `LlmQueryResult`, `RuntimeSnapshot`, `GlobalsInspection`, and related session/prompt-mode types.
-
 ## Safety
 
 The worker uses `node:vm` with several globals stripped. It is **not** a security sandbox — treat it like running code in your user account.
+
+## Advanced runtime usage
+
+Inside `rlm_exec`, the runtime also exposes `llmQuery(...)` for recursive child calls.
+
+```ts
+await llmQuery({
+	prompt: "Analyze the auth module",
+	state: { files: globalThis.authFiles },
+	tools: "read-only",
+	budget: "medium",
+});
+```
+
+## Inspiration
+
+This project is inspired in part by AxLLM’s RLM ideas.
 
 ## Development
 

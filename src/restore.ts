@@ -1,24 +1,30 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { RuntimeSnapshot } from "./types.js";
+import type { LlmQueryRole, RuntimeSnapshot } from "./types.js";
 
+export const RLM_RUNTIME_TYPE = "rlm-runtime";
 export const RLM_WORKSPACE_TYPE = "rlm-workspace";
+
+function workspaceFromUnknown(value: unknown): Record<string, unknown> | null | undefined {
+	if (value === null) return null;
+	if (value && typeof value === "object") return value as Record<string, unknown>;
+	return undefined;
+}
 
 export function getSessionRuntimeKey(ctx: ExtensionContext): string {
 	return ctx.sessionManager.getSessionId();
 }
 
-export function findLatestSnapshot(ctx: ExtensionContext): RuntimeSnapshot | undefined {
-	const branch = ctx.sessionManager.getBranch();
+export function findLatestSnapshotInBranch(branch: unknown[]): RuntimeSnapshot | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry.type === "message") {
+		const entry = branch[i] as any;
+		if (entry?.type === "message") {
 			const message = entry.message;
-			if (message.role !== "toolResult") continue;
+			if (message?.role !== "toolResult") continue;
 			if (message.toolName !== "rlm_exec" && message.toolName !== "rlm_reset") continue;
 			const details = message.details as { snapshot?: RuntimeSnapshot } | undefined;
 			if (details?.snapshot) return details.snapshot;
 		}
-		if (entry.type === "custom" && entry.customType === "rlm-runtime") {
+		if (entry?.type === "custom" && entry.customType === RLM_RUNTIME_TYPE) {
 			const data = entry.data as { snapshot?: RuntimeSnapshot } | undefined;
 			if (data?.snapshot) return data.snapshot;
 		}
@@ -26,16 +32,62 @@ export function findLatestSnapshot(ctx: ExtensionContext): RuntimeSnapshot | und
 	return undefined;
 }
 
-export function findLatestWorkspace(ctx: ExtensionContext): Record<string, unknown> | null | undefined {
-	const branch = ctx.sessionManager.getBranch();
+export function findLatestSnapshot(ctx: ExtensionContext): RuntimeSnapshot | undefined {
+	return findLatestSnapshotInBranch(ctx.sessionManager.getBranch());
+}
+
+export function findLatestWorkspaceInBranch(branch: unknown[]): Record<string, unknown> | null | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry.type !== "custom" || entry.customType !== RLM_WORKSPACE_TYPE) continue;
+		const entry = branch[i] as any;
+		if (entry?.type !== "custom" || entry.customType !== RLM_WORKSPACE_TYPE) continue;
 		const data = entry.data as { workspace?: unknown } | undefined;
-		if (data?.workspace === null) return null;
-		if (data?.workspace && typeof data.workspace === "object") return data.workspace as Record<string, unknown>;
+		return workspaceFromUnknown(data?.workspace);
 	}
 	return undefined;
+}
+
+export function findLatestWorkspace(ctx: ExtensionContext): Record<string, unknown> | null | undefined {
+	return findLatestWorkspaceInBranch(ctx.sessionManager.getBranch());
+}
+
+export function buildChildHandoffFromBranch(
+	branch: unknown[],
+	options: {
+		childId: string;
+		role: LlmQueryRole;
+		depth: number;
+		turns: number;
+		reason: "partial" | "budget_exhausted" | "error";
+		summary?: string;
+		suggestedNextPrompt?: string;
+	},
+): {
+	version: 1;
+	childId: string;
+	role: LlmQueryRole;
+	depth: number;
+	turns: number;
+	reason: "partial" | "budget_exhausted" | "error";
+	snapshot?: RuntimeSnapshot;
+	workspace?: Record<string, unknown> | null;
+	summary?: string;
+	suggestedNextPrompt?: string;
+} {
+	const snapshot = findLatestSnapshotInBranch(branch);
+	const latestWorkspace = findLatestWorkspaceInBranch(branch);
+	const workspace = latestWorkspace ?? workspaceFromUnknown(snapshot?.bindings?.workspace);
+	return {
+		version: 1,
+		childId: options.childId,
+		role: options.role,
+		depth: options.depth,
+		turns: options.turns,
+		reason: options.reason,
+		...(snapshot ? { snapshot } : {}),
+		...(workspace !== undefined ? { workspace } : {}),
+		...(options.summary ? { summary: options.summary } : {}),
+		...(options.suggestedNextPrompt ? { suggestedNextPrompt: options.suggestedNextPrompt } : {}),
+	};
 }
 
 export function composeRuntimeSnapshot(

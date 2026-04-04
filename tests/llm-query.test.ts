@@ -27,6 +27,7 @@ describe("llmQuery normalization", () => {
 			}),
 		).toThrow(/structured-cloneable/);
 	});
+
 });
 
 describe("buildChildPrompt", () => {
@@ -62,6 +63,19 @@ describe("parseChildResult", () => {
 			summary: "final answer",
 			role: "general",
 			usage: { turns: 2 },
+		});
+	});
+
+	it("returns a stable failure for empty text mode output", () => {
+		const input = normalizeLlmQueryInput({ prompt: "hello" });
+		const result = parseChildResult("   ", input, 1);
+
+		expect(result).toEqual({
+			ok: false,
+			answer: "",
+			role: "general",
+			usage: { turns: 1 },
+			error: "Child returned empty output",
 		});
 	});
 
