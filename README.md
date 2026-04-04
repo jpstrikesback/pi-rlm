@@ -6,7 +6,7 @@
 
 **Recursive language model runtime for [Pi](https://github.com/mariozechner/pi-coding-agent)** — a persistent JS workspace inside the agent, with structured child calls via `llmQuery`, prompt modes, and session stats.
 
-> **Models all the way down:** `const child = { sitsOn: pi }; const pi = { sitsOn: machine }; const machine = { sitsOn: child };`
+> **[Turtles all the way down](https://arxiv.org/abs/2512.24601)** — each turtle is an `llmQuery` call, each shell is `globalThis`, base case `maxDepth`, or just run out of tokens.
 
 [![npm version](https://img.shields.io/npm/v/pi-turtle-rlm.svg)](https://www.npmjs.com/package/pi-turtle-rlm)
 [![License](https://img.shields.io/npm/l/pi-turtle-rlm.svg)](./LICENSE)
