@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import {
 	buildRlmModeAppendix,
@@ -22,6 +23,8 @@ import type {
 	GlobalsInspection,
 	LlmQueryFunction,
 	LlmQueryRequest,
+	RlmChildActivity,
+	RlmChildProgressEvent,
 	RlmPromptMode,
 	RlmSessionStats,
 	RlmToolDetails,
@@ -31,6 +34,8 @@ import type {
 const RLM_MODE_TYPE = "rlm-mode";
 const PINK = "\x1b[38;5;213m";
 const RESET = "\x1b[0m";
+const MAX_VISIBLE_CHILDREN = 8;
+const LIVE_UPDATE_THROTTLE_MS = 120;
 
 function safePreview(value: unknown): string {
 	try {
@@ -122,6 +127,102 @@ async function getRuntime(manager: RuntimeManager, initializedKeys: Set<string>,
 
 function computeStats(ctx: ExtensionContext, options: { depth: number; maxDepth: number }, snapshot?: RuntimeSnapshot) {
 	return collectRlmSessionStats(ctx, options, snapshot);
+}
+
+function getVisibleChildren(children: Map<string, RlmChildActivity>): RlmChildActivity[] {
+	return Array.from(children.values()).slice(-MAX_VISIBLE_CHILDREN);
+}
+
+function applyChildProgress(children: Map<string, RlmChildActivity>, event: RlmChildProgressEvent) {
+	switch (event.type) {
+		case "start":
+			children.set(event.childId, {
+				childId: event.childId,
+				role: event.role,
+				promptPreview: event.promptPreview,
+				status: "running",
+				turns: 0,
+			});
+			return;
+		case "turn_end": {
+			const child = children.get(event.childId);
+			if (!child) return;
+			child.turns = event.turns;
+			return;
+		}
+		case "tool_start": {
+			const child = children.get(event.childId);
+			if (!child) return;
+			child.activeTool = event.toolName;
+			return;
+		}
+		case "tool_end": {
+			const child = children.get(event.childId);
+			if (!child) return;
+			if (child.activeTool === event.toolName) child.activeTool = undefined;
+			return;
+		}
+		case "end": {
+			const child = children.get(event.childId);
+			if (!child) return;
+			child.status = event.ok ? "done" : "error";
+			child.turns = event.turns;
+			child.activeTool = undefined;
+			child.summary = event.summary;
+			return;
+		}
+		case "error": {
+			const child = children.get(event.childId);
+			if (!child) return;
+			child.status = "error";
+			child.activeTool = undefined;
+			child.error = event.error;
+			return;
+		}
+	}
+}
+
+function renderChildLine(child: RlmChildActivity, theme: any, expanded: boolean): string {
+	const status =
+		child.status === "running"
+			? theme.fg("warning", "running")
+			: child.status === "done"
+				? theme.fg("success", "done")
+				: theme.fg("error", "error");
+	let text = `- ${theme.fg("accent", child.role)} ${theme.fg("dim", child.promptPreview)}`;
+	text += `\n  ${status}${theme.fg("dim", ` · turn ${child.turns}`)}`;
+	if (child.activeTool) text += theme.fg("muted", ` · ${child.activeTool}`);
+	if (expanded && child.summary) text += `\n  ${theme.fg("muted", child.summary)}`;
+	if (expanded && child.error) text += `\n  ${theme.fg("error", child.error)}`;
+	return text;
+}
+
+function renderRlmExecResult(result: { content: Array<{ type: string; text?: string }>; details?: unknown }, options: { expanded: boolean; isPartial: boolean }, theme: any) {
+	const details = result.details as RlmToolDetails | undefined;
+	const visibleChildren = details?.live?.children ?? [];
+	const childSummary = details?.childQueryCount ? ` · child ${details.childQueryCount}${details.childTurns ? `/${details.childTurns}t` : ""}` : "";
+
+	if (options.isPartial) {
+		let text = theme.fg("warning", "Running RLM exec") + theme.fg("dim", childSummary);
+		if (visibleChildren.length === 0) {
+			text += `\n${theme.fg("muted", "(waiting for child activity)")}`;
+			return new Text(text, 0, 0);
+		}
+		for (const child of visibleChildren) text += `\n${renderChildLine(child, theme, false)}`;
+		return new Text(text, 0, 0);
+	}
+
+	const content = result.content[0];
+	const contentText = content?.type === "text" ? (content.text ?? "") : "";
+	const headline = contentText.startsWith("Execution failed.")
+		? theme.fg("error", "Execution failed")
+		: theme.fg("success", "Execution succeeded");
+	let text = headline + theme.fg("dim", childSummary);
+	if (visibleChildren.length > 0) {
+		for (const child of visibleChildren) text += `\n${renderChildLine(child, theme, options.expanded)}`;
+	}
+	if (options.expanded && contentText) text += `\n\n${theme.fg("dim", contentText)}`;
+	return new Text(text, 0, 0);
 }
 
 export function createRlmExtensionFactory(options: {
@@ -219,12 +320,36 @@ export function createRlmExtensionFactory(options: {
 						"JavaScript to execute. Helpers available inside the runtime: inspectGlobals(), final(value), llmQuery({ prompt, role, state, tools, budget, output }).",
 				}),
 			}),
+			renderCall(_args, theme) {
+				return new Text(theme.fg("toolTitle", theme.bold("rlm_exec")), 0, 0);
+			},
+			renderResult(result, { expanded, isPartial }, theme) {
+				return renderRlmExecResult(result as { content: Array<{ type: string; text?: string }>; details?: unknown }, { expanded, isPartial }, theme);
+			},
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const runtime = await getRuntime(manager, initializedKeys, ctx);
 				let childQueryCount = 0;
 				let childTurns = 0;
+				let lastUpdateAt = 0;
+				const children = new Map<string, RlmChildActivity>();
+				const emitLiveUpdate = () => {
+					const now = Date.now();
+					if (now - lastUpdateAt < LIVE_UPDATE_THROTTLE_MS) return;
+					lastUpdateAt = now;
+					_onUpdate?.({
+						content: [{ type: "text", text: "RLM exec running..." }],
+						details: {
+							childQueryCount,
+							childTurns,
+							live: {
+								children: getVisibleChildren(children),
+							},
+						},
+					});
+				};
 				const llmQuery: LlmQueryFunction = async (input: LlmQueryRequest) => {
 					childQueryCount += 1;
+					emitLiveUpdate();
 					const result = await runChildQuery(input, ctx, {
 						depth: options.depth + 1,
 						maxDepth: options.maxDepth,
@@ -235,11 +360,17 @@ export function createRlmExtensionFactory(options: {
 							promptMode: rlmPromptMode,
 						}),
 						parentActiveTools: pi.getActiveTools(),
+						onProgress: (event) => {
+							applyChildProgress(children, event);
+							emitLiveUpdate();
+						},
 					});
 					childTurns += result.usage?.turns ?? 0;
+					emitLiveUpdate();
 					return result;
 				};
 
+				emitLiveUpdate();
 				const result = await runtime.exec(params.code, { llmQuery });
 
 				const details: RlmToolDetails = {
@@ -252,6 +383,9 @@ export function createRlmExtensionFactory(options: {
 					finalValue: result.finalValue,
 					childQueryCount,
 					childTurns,
+					live: {
+						children: getVisibleChildren(children),
+					},
 				};
 
 				const stats = computeStats(ctx, options, result.snapshot);

@@ -37,6 +37,7 @@ export type RlmToolDetails = {
 	finalValue?: unknown;
 	childQueryCount?: number;
 	childTurns?: number;
+	live?: RlmLiveExecDetails;
 };
 
 export type RlmPromptMode = "balanced" | "coordinator" | "aggressive";
@@ -97,6 +98,56 @@ export type LlmQueryResult = {
 };
 
 export type LlmQueryFunction = (input: LlmQueryRequest) => Promise<LlmQueryResult>;
+
+export type RlmChildProgressEvent =
+	| {
+			type: "start";
+			childId: string;
+			role: LlmQueryRole;
+			promptPreview: string;
+	  }
+	| {
+			type: "turn_end";
+			childId: string;
+			turns: number;
+	  }
+	| {
+			type: "tool_start";
+			childId: string;
+			toolName: string;
+	  }
+	| {
+			type: "tool_end";
+			childId: string;
+			toolName: string;
+	  }
+	| {
+			type: "end";
+			childId: string;
+			ok: boolean;
+			turns: number;
+			summary?: string;
+	  }
+	| {
+			type: "error";
+			childId: string;
+			error: string;
+	  };
+
+export type RlmChildActivity = {
+	childId: string;
+	role: LlmQueryRole;
+	promptPreview: string;
+	status: "running" | "done" | "error";
+	turns: number;
+	activeTool?: string;
+	summary?: string;
+	error?: string;
+};
+
+export type RlmLiveExecDetails = {
+	children: RlmChildActivity[];
+};
 
 export type RlmSessionStats = {
 	enabled: boolean;
