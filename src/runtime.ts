@@ -1,0 +1,428 @@
+import { Worker } from "node:worker_threads";
+import type { ExecResult, GlobalsInspection, LlmQueryFunction, RuntimeSnapshot } from "./types.js";
+
+type PendingRequest = {
+	resolve: (value: any) => void;
+	reject: (error: Error) => void;
+	timeout?: ReturnType<typeof setTimeout>;
+};
+
+const EXEC_TIMEOUT_MS = 120000;
+const DEFAULT_TIMEOUT_MS = 5000;
+const VM_SYNC_TIMEOUT_MS = 1000;
+
+function createWorkerSource() {
+	function workerMain() {
+		const { parentPort } = require("node:worker_threads");
+		const vm = require("node:vm");
+
+		const runtimeBindings = Object.create(null);
+		const pendingRpc = new Map();
+		let rpcCounter = 0;
+
+		const VM_SYNC_TIMEOUT_MS = 1000;
+		const MAX_PREVIEW = 160;
+		const MAX_STDOUT_CHARS = 8000;
+		const MAX_LOG_LINES = 200;
+		const DANGEROUS_GLOBALS = [
+			"process",
+			"require",
+			"module",
+			"global",
+			"fetch",
+			"XMLHttpRequest",
+			"WebSocket",
+			"EventSource",
+			"Worker",
+			"SharedWorker",
+			"navigator",
+			"location",
+			"eval",
+			"Function",
+		];
+		const RESERVED_KEYS = new Set([
+			...DANGEROUS_GLOBALS,
+			"console",
+			"globalThis",
+			"inspectGlobals",
+			"llmQuery",
+			"final",
+		]);
+
+		const formatError = (error: unknown): string => {
+			if (error instanceof Error) return error.stack || error.message || String(error);
+			return String(error);
+		};
+
+		const typeOfValue = (value: unknown): string => {
+			if (value === null) return "null";
+			if (Array.isArray(value)) return "array";
+			if (value instanceof Map) return "map";
+			if (value instanceof Set) return "set";
+			if (value instanceof Date) return "date";
+			return typeof value === "object" ? value.constructor?.name?.toLowerCase?.() || "object" : typeof value;
+		};
+
+		const sizeOfValue = (value: unknown): string | undefined => {
+			if (Array.isArray(value)) return `${value.length} items`;
+			if (value instanceof Map || value instanceof Set) return `${value.size} items`;
+			if (value && typeof value === "object") return `${Object.keys(value).length} keys`;
+			if (typeof value === "string") return `${value.length} chars`;
+			return undefined;
+		};
+
+		const serializePreview = (value: unknown): string => {
+			try {
+				if (typeof value === "string")
+					return value.length > MAX_PREVIEW ? `${value.slice(0, MAX_PREVIEW - 1)}…` : value;
+				const seen = new WeakSet();
+				const text = JSON.stringify(value, (_key: string, inner: unknown) => {
+					if (typeof inner === "function") return "[Function]";
+					if (typeof inner === "object" && inner !== null) {
+						if (seen.has(inner)) return "[Circular]";
+						seen.add(inner);
+					}
+					if (inner instanceof Map) return { __type: "Map", entries: Array.from(inner.entries()).slice(0, 5) };
+					if (inner instanceof Set) return { __type: "Set", values: Array.from(inner.values()).slice(0, 5) };
+					if (inner instanceof Date) return inner.toISOString();
+					return inner;
+				});
+				if (!text) return String(value);
+				return text.length > MAX_PREVIEW ? `${text.slice(0, MAX_PREVIEW - 1)}…` : text;
+			} catch {
+				try {
+					const text = String(value);
+					return text.length > MAX_PREVIEW ? `${text.slice(0, MAX_PREVIEW - 1)}…` : text;
+				} catch {
+					return "[Unserializable]";
+				}
+			}
+		};
+
+		const canClone = (value: unknown): boolean => {
+			try {
+				structuredClone(value);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const inspect = () => {
+			const entries = Object.keys(runtimeBindings)
+				.sort((a, b) => a.localeCompare(b))
+				.map((name) => {
+					const value = runtimeBindings[name];
+					return {
+						name,
+						type: typeOfValue(value),
+						size: sizeOfValue(value),
+						preview: serializePreview(value),
+						restorable: canClone(value),
+					};
+				});
+			const table = entries.length
+				? entries
+						.map(
+							(entry) =>
+								`- ${entry.name}: ${entry.type}${entry.size ? ` (${entry.size})` : ""}${entry.preview ? ` = ${entry.preview}` : ""}${entry.restorable ? "" : " [preview-only]"}`,
+						)
+						.join("\n")
+				: "(runtime empty)";
+			return { entries, table };
+		};
+
+		const snapshot = () => {
+			const inspection = inspect();
+			const bindings = Object.create(null);
+			for (const key of Object.keys(runtimeBindings)) {
+				const value = runtimeBindings[key];
+				if (!canClone(value)) continue;
+				bindings[key] = structuredClone(value);
+			}
+			return { version: 1, bindings, entries: inspection.entries };
+		};
+
+		const restore = (input: { bindings?: Record<string, unknown> }) => {
+			for (const key of Object.keys(runtimeBindings)) delete runtimeBindings[key];
+			for (const [key, value] of Object.entries(input?.bindings || {})) {
+				runtimeBindings[key] = value;
+			}
+			return { inspection: inspect(), snapshot: snapshot() };
+		};
+
+		const reset = () => restore({ bindings: {} });
+
+		const callParent = (method: string, payload: unknown) =>
+			new Promise((resolve, reject) => {
+				const rpcId = `rpc-${++rpcCounter}`;
+				pendingRpc.set(rpcId, { resolve, reject });
+				parentPort.postMessage({ type: "rpc", rpcId, method, payload });
+			});
+
+		const createConsoleProxy = (logs: string[]) => {
+			const push = (...args: unknown[]) => {
+				if (logs.length >= MAX_LOG_LINES) return;
+				const line = args.map((arg) => serializePreview(arg)).join(" ");
+				logs.push(line);
+			};
+			return { log: push, info: push, warn: push, error: push };
+		};
+
+		const createSandbox = (consoleProxy: ReturnType<typeof createConsoleProxy>, finalState: { value: unknown }) => {
+			const sandbox = Object.create(null);
+			for (const [key, value] of Object.entries(runtimeBindings)) {
+				sandbox[key] = value;
+			}
+			sandbox.console = consoleProxy;
+			sandbox.inspectGlobals = () => inspect();
+			sandbox.llmQuery = async (input: unknown) => callParent("llmQuery", { input });
+			sandbox.final = (value: unknown) => {
+				finalState.value = value;
+				return value;
+			};
+			sandbox.globalThis = sandbox;
+			for (const key of DANGEROUS_GLOBALS) sandbox[key] = undefined;
+			return sandbox;
+		};
+
+		const persistSandbox = (sandbox: Record<string, unknown>) => {
+			for (const key of Object.keys(runtimeBindings)) delete runtimeBindings[key];
+			for (const key of Object.keys(sandbox)) {
+				if (RESERVED_KEYS.has(key)) continue;
+				const value = sandbox[key];
+				if (!canClone(value)) continue;
+				runtimeBindings[key] = structuredClone(value);
+			}
+		};
+
+		const runCode = async (code: string) => {
+			const logs: string[] = [];
+			const finalState = { value: undefined };
+			const sandbox = createSandbox(createConsoleProxy(logs), finalState);
+			try {
+				const context = vm.createContext(sandbox, {
+					codeGeneration: { strings: false, wasm: false },
+				});
+				const script = new vm.Script(`(async () => {\n${code}\n})()`, {
+					filename: "rlm-exec.js",
+				});
+				const result = await Promise.resolve(script.runInContext(context, { timeout: VM_SYNC_TIMEOUT_MS }));
+				persistSandbox(sandbox);
+				const inspection = inspect();
+				const stdout = logs.join("\n").slice(0, MAX_STDOUT_CHARS);
+				return {
+					ok: true,
+					stdout,
+					returnValuePreview: result === undefined ? undefined : serializePreview(result),
+					inspection,
+					snapshot: snapshot(),
+					finalValue: finalState.value,
+				};
+			} catch (error: unknown) {
+				const inspection = inspect();
+				const stdout = logs.join("\n").slice(0, MAX_STDOUT_CHARS);
+				return {
+					ok: false,
+					stdout,
+					error: formatError(error),
+					inspection,
+					snapshot: snapshot(),
+					finalValue: finalState.value,
+				};
+			}
+		};
+
+		parentPort.on("message", async (message: Record<string, unknown>) => {
+			if (message?.type === "rpc_result") {
+				const pending = pendingRpc.get(message.rpcId as string);
+				if (!pending) return;
+				pendingRpc.delete(message.rpcId as string);
+				if (message.ok) pending.resolve(message.value);
+				else pending.reject(new Error((message.error as string) || "RPC failed"));
+				return;
+			}
+
+			if (message?.type !== "request") return;
+			const requestId = message.requestId as string;
+			try {
+				let value: unknown;
+				switch (message.method) {
+					case "exec":
+						value = await runCode((message.payload as { code: string }).code);
+						break;
+					case "inspect":
+						value = inspect();
+						break;
+					case "restore":
+						value = restore((message.payload as { snapshot: { bindings?: Record<string, unknown> } }).snapshot);
+						break;
+					case "reset":
+						value = reset();
+						break;
+					default:
+						throw new Error(`Unknown worker method: ${String(message.method)}`);
+				}
+				parentPort.postMessage({ type: "response", requestId, ok: true, value });
+			} catch (error: unknown) {
+				parentPort.postMessage({
+					type: "response",
+					requestId,
+					ok: false,
+					error: formatError(error),
+				});
+			}
+		});
+	}
+
+	return `const __name = (fn) => fn;\n(${workerMain.toString()})();`;
+}
+
+export class RuntimeSession {
+	private worker: Worker;
+	private requestCounter = 0;
+	private pending = new Map<string, PendingRequest>();
+	private currentLlmQuery?: LlmQueryFunction;
+	private lastSnapshot: RuntimeSnapshot = { version: 1, bindings: {}, entries: [] };
+
+	constructor() {
+		this.worker = this.createWorker();
+	}
+
+	private createWorker() {
+		const worker = new Worker(createWorkerSource(), { eval: true });
+		worker.on("message", (message) => this.onMessage(message));
+		worker.on("error", (error) => {
+			for (const pending of this.pending.values()) {
+				if (pending.timeout) clearTimeout(pending.timeout);
+				pending.reject(error instanceof Error ? error : new Error(String(error)));
+			}
+			this.pending.clear();
+		});
+		return worker;
+	}
+
+	private async restart(snapshot?: RuntimeSnapshot) {
+		try {
+			await this.worker.terminate();
+		} catch {
+			// ignore
+		}
+		this.worker = this.createWorker();
+		if (snapshot) await this.restore(snapshot);
+	}
+
+	private onMessage(message: any) {
+		if (message?.type === "response") {
+			const pending = this.pending.get(message.requestId);
+			if (!pending) return;
+			this.pending.delete(message.requestId);
+			if (pending.timeout) clearTimeout(pending.timeout);
+			if (message.ok) pending.resolve(message.value);
+			else pending.reject(new Error(message.error || "Worker request failed"));
+			return;
+		}
+
+		if (message?.type === "rpc" && message.method === "llmQuery") {
+			void (async () => {
+				try {
+					if (!this.currentLlmQuery) throw new Error("llmQuery is not available in this execution context");
+					const value = await this.currentLlmQuery(message.payload?.input);
+					this.worker.postMessage({ type: "rpc_result", rpcId: message.rpcId, ok: true, value });
+				} catch (error) {
+					this.worker.postMessage({
+						type: "rpc_result",
+						rpcId: message.rpcId,
+						ok: false,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			})();
+		}
+	}
+
+	private request<T>(method: string, payload?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+		const requestId = `req-${++this.requestCounter}`;
+		return new Promise<T>((resolve, reject) => {
+			const pending: PendingRequest = { resolve, reject };
+			if (timeoutMs > 0) {
+				pending.timeout = setTimeout(() => {
+					this.pending.delete(requestId);
+					reject(new Error(`Runtime ${method} timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+			}
+			this.pending.set(requestId, pending);
+			this.worker.postMessage({ type: "request", requestId, method, payload });
+		});
+	}
+
+	async exec(code: string, hooks?: { llmQuery?: LlmQueryFunction }): Promise<ExecResult> {
+		this.currentLlmQuery = hooks?.llmQuery;
+		const previousSnapshot = this.lastSnapshot;
+		try {
+			const result = await this.request<ExecResult>("exec", { code }, EXEC_TIMEOUT_MS);
+			this.lastSnapshot = result.snapshot;
+			return result;
+		} catch (error) {
+			await this.restart(previousSnapshot);
+			throw error;
+		} finally {
+			this.currentLlmQuery = undefined;
+		}
+	}
+
+	async inspect(): Promise<GlobalsInspection> {
+		return this.request<GlobalsInspection>("inspect");
+	}
+
+	async restore(snapshot: RuntimeSnapshot): Promise<void> {
+		const result = await this.request<{ inspection: GlobalsInspection; snapshot: RuntimeSnapshot }>("restore", {
+			snapshot,
+		});
+		this.lastSnapshot = result.snapshot;
+	}
+
+	async reset(): Promise<void> {
+		const result = await this.request<{ inspection: GlobalsInspection; snapshot: RuntimeSnapshot }>("reset");
+		this.lastSnapshot = result.snapshot;
+	}
+
+	getSnapshot(): RuntimeSnapshot {
+		return this.lastSnapshot;
+	}
+
+	async dispose(): Promise<void> {
+		for (const pending of this.pending.values()) {
+			if (pending.timeout) clearTimeout(pending.timeout);
+			pending.reject(new Error("Runtime disposed"));
+		}
+		this.pending.clear();
+		await this.worker.terminate();
+	}
+}
+
+export class RuntimeManager {
+	private sessions = new Map<string, RuntimeSession>();
+
+	getOrCreate(key: string): RuntimeSession {
+		let session = this.sessions.get(key);
+		if (!session) {
+			session = new RuntimeSession();
+			this.sessions.set(key, session);
+		}
+		return session;
+	}
+
+	async dispose(key: string): Promise<void> {
+		const session = this.sessions.get(key);
+		if (!session) return;
+		this.sessions.delete(key);
+		await session.dispose();
+	}
+
+	async disposeAll(): Promise<void> {
+		const sessions = Array.from(this.sessions.values());
+		this.sessions.clear();
+		await Promise.all(sessions.map((session) => session.dispose()));
+	}
+}

@@ -1,0 +1,24 @@
+node_modules/
+
+# Logs and debug
+npm-debug.log*
+*.log
+
+# OS
+.DS_Store
+
+# Build / cache
+dist/
+build/
+*.tsbuildinfo
+
+# Env (keep .env.example if you add one)
+.env
+.env.*
+!.env.example
+
+# Test coverage
+coverage/
+
+# IDE (optional local junk)
+.idea/

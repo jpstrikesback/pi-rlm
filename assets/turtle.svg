@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+	<title>Fractal LLM Turtle</title>
+	<defs>
+		<style>
+			.line {
+				fill: none;
+				stroke: #ff8ad4;
+				stroke-linecap: round;
+				stroke-linejoin: round;
+			}
+			.bg {
+				fill: #ffffff;
+				opacity: 0.92;
+			}
+		</style>
+		
+		<!-- The Turtle -->
+		<g id="turtle">
+			<!-- Tail -->
+			<path class="line" d="M0 40 L0 56" />
+			<!-- Legs -->
+			<ellipse class="line bg" cx="-24" cy="32" rx="10" ry="14" transform="rotate(30 -24 32)" />
+			<ellipse class="line bg" cx="24" cy="32" rx="10" ry="14" transform="rotate(-30 24 32)" />
+			<ellipse class="line bg" cx="-32" cy="-24" rx="11" ry="16" transform="rotate(-40 -32 -24)" />
+			<ellipse class="line bg" cx="32" cy="-24" rx="11" ry="16" transform="rotate(40 32 -24)" />
+			
+			<!-- Head -->
+			<ellipse class="line bg" cx="0" cy="-48" rx="14" ry="16" />
+			<!-- Happy Eyes -->
+			<path class="line" d="M-8 -51 Q-5 -54 -2 -51 M2 -51 Q5 -54 8 -51" />
+			<!-- Smile -->
+			<path class="line" d="M-3 -44 Q0 -41 3 -44" />
+			
+			<!-- Shell -->
+			<circle class="line bg" cx="0" cy="0" r="42" />
+			<!-- Inner shell ring -->
+			<circle class="line" cx="0" cy="0" r="34" opacity="0.4" />
+		</g>
+
+		<!-- OpenAI Logo -->
+		<g id="openai">
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" />
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" transform="rotate(60)" />
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" transform="rotate(120)" />
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" transform="rotate(180)" />
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" transform="rotate(240)" />
+			<path class="line" d="M-7 -12 L12 -12 A12 12 0 0 1 18 -1 L9 5" transform="rotate(300)" />
+		</g>
+
+		<!-- Anthropic Asterisk -->
+		<g id="anthropic">
+			<path class="line" d="M0 -20 L0 20 M-17 -10 L17 10 M-17 10 L17 -10" />
+		</g>
+
+		<!-- Gemini Spark -->
+		<g id="gemini">
+			<path class="line bg" d="M0 -22 Q0 0 22 0 Q0 0 0 22 Q0 0 -22 0 Q0 0 0 -22 Z" />
+			<path class="line" d="M0 -8 Q0 0 8 0 Q0 0 0 8 Q0 0 -8 0 Q0 0 0 -8 Z" opacity="0.4" />
+		</g>
+	</defs>
+
+	<!-- Draw the fractal stack -->
+	<g transform="translate(64, 64)">
+		<!-- Level 1: Big Turtle (Scale 1.0 -> Stroke 2.4) -->
+		<g stroke-width="2.4">
+			<use href="#turtle" />
+			<!-- OpenAI (Scale 1.4 -> Stroke 2.4 / 1.4 = 1.7) -->
+			<g transform="scale(1.4)" stroke-width="1.7">
+				<use href="#openai" />
+			</g>
+		</g>
+
+		<!-- Level 2: Medium Turtle (Scale 0.45 -> Stroke 2.4 / 0.45 = 5.3) -->
+		<g transform="scale(0.45) rotate(25)" stroke-width="5.3">
+			<use href="#turtle" />
+			<!-- Anthropic (Scale 1.2 -> Stroke 5.3 / 1.2 = 4.4) -->
+			<g transform="scale(1.2)" stroke-width="4.4">
+				<use href="#anthropic" />
+			</g>
+		</g>
+
+		<!-- Level 3: Small Turtle (Scale 0.2025 -> Stroke 2.4 / 0.2025 = 11.8) -->
+		<g transform="scale(0.2025) rotate(-20)" stroke-width="11.8">
+			<use href="#turtle" />
+			<!-- Gemini (Scale 1.1 -> Stroke 11.8 / 1.1 = 10.7) -->
+			<g transform="scale(1.1)" stroke-width="10.7">
+				<use href="#gemini" />
+			</g>
+		</g>
+
+		<!-- Level 4: Tiny Turtle (Scale 0.091 -> Stroke 2.4 / 0.091 = 26.3) -->
+		<g transform="scale(0.091) rotate(40)" stroke-width="26.3">
+			<use href="#turtle" />
+			<!-- Center dot to finish the recursion -->
+			<circle cx="0" cy="0" r="14" fill="#ff8ad4" stroke="none" />
+		</g>
+	</g>
+</svg>

@@ -1,0 +1,70 @@
+{
+	"name": "pi-turtle-rlm",
+	"version": "0.1.0",
+	"description": "pi-turtle-rlm — RLM for Pi: persistent runtime, llmQuery recursion (it's models all the way down)",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"keywords": [
+		"pi",
+		"pi-package",
+		"rlm",
+		"pi-turtle-rlm",
+		"turtles",
+		"recursion",
+		"pi-coding-agent",
+		"extension"
+	],
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jpstrikesback/pi-rlm.git"
+	},
+	"bugs": {
+		"url": "https://github.com/jpstrikesback/pi-rlm/issues"
+	},
+	"files": [
+		"dist",
+		"assets",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"typecheck": "tsc --noEmit",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"smoke": "tsx ./scripts/smoke.ts",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"prepare": "npm run build",
+		"prepublishOnly": "npm run typecheck && npm test && npm run build"
+	},
+	"pi": {
+		"extensions": [
+			"./dist/index.js"
+		]
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-agent-core": "*",
+		"@mariozechner/pi-coding-agent": "*",
+		"@sinclair/typebox": "*"
+	},
+	"devDependencies": {
+		"@mariozechner/pi-agent-core": "^0.65.0",
+		"@mariozechner/pi-coding-agent": "^0.65.0",
+		"@sinclair/typebox": "^0.34.41",
+		"prettier": "^3.8.1",
+		"tsx": "^4.21.0",
+		"typescript": "^5.9.3",
+		"vitest": "^3.2.4"
+	}
+}
