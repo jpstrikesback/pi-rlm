@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findBootstrapSnapshot, findLatestSnapshot, getSessionRuntimeKey } from "../src/restore.js";
+import { composeRuntimeSnapshot, findBootstrapSnapshot, findLatestSnapshot, findLatestWorkspace, getSessionRuntimeKey, RLM_WORKSPACE_TYPE } from "../src/restore.js";
 import type { RuntimeSnapshot } from "../src/types.js";
 
 function makeCtx(sessionId: string, branch: unknown[]) {
@@ -73,6 +73,77 @@ describe("restore helpers", () => {
 		]);
 
 		expect(findLatestSnapshot(ctx)).toBeUndefined();
+	});
+
+	it("finds the latest persisted workspace entry", () => {
+		const workspace = { goal: "refactor", plan: ["a", "b"] };
+		const ctx = makeCtx("session-1", [
+			{
+				type: "custom",
+				customType: RLM_WORKSPACE_TYPE,
+				data: { workspace: { old: true } },
+			},
+			{
+				type: "custom",
+				customType: RLM_WORKSPACE_TYPE,
+				data: { workspace },
+			},
+		]);
+
+		expect(findLatestWorkspace(ctx)).toEqual(workspace);
+	});
+
+	it("returns null when the latest workspace entry clears persisted workspace", () => {
+		const ctx = makeCtx("session-1", [
+			{
+				type: "custom",
+				customType: RLM_WORKSPACE_TYPE,
+				data: { workspace: { old: true } },
+			},
+			{
+				type: "custom",
+				customType: RLM_WORKSPACE_TYPE,
+				data: { workspace: null },
+			},
+		]);
+
+		expect(findLatestWorkspace(ctx)).toBeNull();
+	});
+
+	it("returns undefined when no workspace entry exists", () => {
+		expect(findLatestWorkspace(makeCtx("session-1", []))).toBeUndefined();
+	});
+
+	it("overlays workspace into the restored runtime snapshot", () => {
+		const snapshot: RuntimeSnapshot = {
+			version: 1,
+			bindings: { answer: 42, workspace: { old: true } },
+			entries: [],
+		};
+		const workspace = { goal: "refactor", plan: ["a", "b"] };
+
+		expect(composeRuntimeSnapshot(snapshot, workspace)).toEqual({
+			version: 1,
+			bindings: {
+				answer: 42,
+				workspace,
+			},
+			entries: [],
+		});
+	});
+
+	it("clears workspace from the restored runtime snapshot when explicitly reset", () => {
+		const snapshot: RuntimeSnapshot = {
+			version: 1,
+			bindings: { answer: 42, workspace: { old: true } },
+			entries: [],
+		};
+
+		expect(composeRuntimeSnapshot(snapshot, null)).toEqual({
+			version: 1,
+			bindings: { answer: 42 },
+			entries: [],
+		});
 	});
 
 	it("builds a bootstrap snapshot from the latest child bootstrap entry", () => {

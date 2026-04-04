@@ -154,6 +154,7 @@ Inside `rlm_exec`:
 - One `worker_threads` VM per Pi session key
 - State is snapshotted as structured-cloneable globals
 - Snapshots restore on session restore, tree navigation, and fork
+- `globalThis.workspace` is also persisted as a dedicated branch-aware custom entry so it survives resume, `/tree`, and `/fork` as the durable coordination root
 - Child bootstrap uses `globalThis.input` / `globalThis.parentState`
 
 ## Programmatic default export

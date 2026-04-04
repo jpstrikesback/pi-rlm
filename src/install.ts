@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -15,7 +16,7 @@ import {
 } from "./prompt-mode.js";
 import { parseRlmCommandAction } from "./rlm-command.js";
 import { runChildQuery } from "./recursion.js";
-import { findBootstrapSnapshot, findLatestSnapshot, getSessionRuntimeKey } from "./restore.js";
+import { composeRuntimeSnapshot, findBootstrapSnapshot, findLatestSnapshot, findLatestWorkspace, getSessionRuntimeKey, RLM_WORKSPACE_TYPE } from "./restore.js";
 import { RuntimeManager } from "./runtime.js";
 import { collectRlmSessionStats } from "./stats.js";
 import type {
@@ -112,9 +113,12 @@ function applyStatus(
 async function restoreRuntime(manager: RuntimeManager, initializedKeys: Set<string>, ctx: ExtensionContext) {
 	const key = getSessionRuntimeKey(ctx);
 	const runtime = manager.getOrCreate(key);
-	const snapshot = findLatestSnapshot(ctx) ?? findBootstrapSnapshot(ctx);
-	if (snapshot) await runtime.restore(snapshot);
-	else await runtime.reset();
+	const workspace = findLatestWorkspace(ctx);
+	const restoredSnapshot = composeRuntimeSnapshot(
+		findLatestSnapshot(ctx) ?? findBootstrapSnapshot(ctx),
+		workspace && workspace !== null ? markRunningChildrenInterrupted(workspace) : workspace,
+	);
+	await runtime.restore(restoredSnapshot);
 	initializedKeys.add(key);
 	return runtime;
 }
@@ -127,6 +131,22 @@ async function getRuntime(manager: RuntimeManager, initializedKeys: Set<string>,
 
 function computeStats(ctx: ExtensionContext, options: { depth: number; maxDepth: number }, snapshot?: RuntimeSnapshot) {
 	return collectRlmSessionStats(ctx, options, snapshot);
+}
+
+function normalizeWorkspaceBinding(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" ? (structuredClone(value) as Record<string, unknown>) : undefined;
+}
+
+function markRunningChildrenInterrupted(workspace: Record<string, unknown>): Record<string, unknown> {
+	const next = structuredClone(workspace) as Record<string, unknown>;
+	const children = next.children;
+	if (!Array.isArray(children)) return next;
+	next.children = children.map((child) => {
+		if (!child || typeof child !== "object") return child;
+		const current = child as Record<string, unknown>;
+		return current.status === "running" ? { ...current, status: "interrupted" } : current;
+	});
+	return next;
 }
 
 function getVisibleChildren(children: Map<string, RlmChildActivity>): RlmChildActivity[] {
@@ -195,6 +215,17 @@ function renderChildLine(child: RlmChildActivity, theme: any, expanded: boolean)
 	if (expanded && child.summary) text += `\n  ${theme.fg("muted", child.summary)}`;
 	if (expanded && child.error) text += `\n  ${theme.fg("error", child.error)}`;
 	return text;
+}
+
+function persistWorkspaceEntry(
+	pi: ExtensionAPI,
+	currentWorkspace: Record<string, unknown> | undefined,
+	previousWorkspace: Record<string, unknown> | null | undefined,
+) {
+	const nextWorkspace = currentWorkspace ?? null;
+	const lastWorkspace = previousWorkspace ?? null;
+	if (isDeepStrictEqual(nextWorkspace, lastWorkspace)) return;
+	pi.appendEntry(RLM_WORKSPACE_TYPE, { workspace: nextWorkspace });
 }
 
 function renderRlmExecResult(result: { content: Array<{ type: string; text?: string }>; details?: unknown }, options: { expanded: boolean; isPartial: boolean }, theme: any) {
@@ -328,6 +359,7 @@ export function createRlmExtensionFactory(options: {
 			},
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const runtime = await getRuntime(manager, initializedKeys, ctx);
+				const previousWorkspace = findLatestWorkspace(ctx);
 				let childQueryCount = 0;
 				let childTurns = 0;
 				let lastUpdateAt = 0;
@@ -372,6 +404,7 @@ export function createRlmExtensionFactory(options: {
 
 				emitLiveUpdate();
 				const result = await runtime.exec(params.code, { llmQuery });
+				persistWorkspaceEntry(pi, normalizeWorkspaceBinding(result.snapshot.bindings.workspace), previousWorkspace);
 
 				const details: RlmToolDetails = {
 					turn: ctx.sessionManager.getBranch().length,
@@ -429,6 +462,7 @@ export function createRlmExtensionFactory(options: {
 			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 				const runtime = await getRuntime(manager, initializedKeys, ctx);
 				await runtime.reset();
+				pi.appendEntry(RLM_WORKSPACE_TYPE, { workspace: null });
 				const inspection = await runtime.inspect();
 				const stats = computeStats(ctx, options, runtime.getSnapshot());
 				applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
@@ -482,6 +516,7 @@ export function createRlmExtensionFactory(options: {
 							const runtime = await getRuntime(manager, initializedKeys, ctx);
 							await runtime.reset();
 							pi.appendEntry("rlm-runtime", { snapshot: runtime.getSnapshot() });
+							pi.appendEntry(RLM_WORKSPACE_TYPE, { workspace: null });
 							const stats = computeStats(ctx, options, runtime.getSnapshot());
 							applyStatus(ctx, rlmModeEnabled, rlmPromptMode, true, stats);
 							ctx.ui.notify("RLM runtime reset", "info");
