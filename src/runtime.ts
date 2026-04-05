@@ -24,6 +24,8 @@ function createWorkerSource() {
 		const MAX_PREVIEW = 160;
 		const MAX_STDOUT_CHARS = 8000;
 		const MAX_LOG_LINES = 200;
+		const MAX_CHILD_ARTIFACTS = 24;
+		const INTERNAL_CHILD_ARTIFACT_KEY = "__rlmInternal";
 		const DANGEROUS_GLOBALS = [
 			"process",
 			"require",
@@ -169,6 +171,51 @@ function createWorkerSource() {
 			return { log: push, info: push, warn: push, error: push };
 		};
 
+		const ensureWorkspace = (sandbox: Record<string, unknown>) => {
+			const current = sandbox.workspace;
+			if (current && typeof current === "object" && !Array.isArray(current)) return current;
+			const workspace = Object.create(null);
+			sandbox.workspace = workspace;
+			return workspace;
+		};
+
+		const stripInternalLlmQueryResult = (value: unknown) => {
+			if (!value || typeof value !== "object" || Array.isArray(value)) {
+				return { publicValue: value, childArtifact: undefined };
+			}
+			const source = value as Record<string, unknown>;
+			const internal = source[INTERNAL_CHILD_ARTIFACT_KEY] as { childArtifact?: unknown } | undefined;
+			const publicValue = Object.assign(Object.create(null), source);
+			delete publicValue[INTERNAL_CHILD_ARTIFACT_KEY];
+			return {
+				publicValue,
+				childArtifact: internal?.childArtifact,
+			};
+		};
+
+		const mergeChildArtifactIntoWorkspace = (sandbox: Record<string, unknown>, artifact: unknown) => {
+			if (!artifact || typeof artifact !== "object" || !canClone(artifact)) return;
+			const workspace = ensureWorkspace(sandbox) as Record<string, unknown>;
+			const clonedArtifact = structuredClone(artifact);
+			const existing = Array.isArray(workspace.childArtifacts) ? workspace.childArtifacts.slice(-(MAX_CHILD_ARTIFACTS - 1)) : [];
+			existing.push(clonedArtifact);
+			workspace.childArtifacts = existing;
+			workspace.lastChildArtifact = clonedArtifact;
+			const summary = (clonedArtifact as Record<string, unknown>).summary;
+			if (typeof summary === "string" && summary.trim()) {
+				const summaries = Array.isArray(workspace.childArtifactSummaries)
+					? workspace.childArtifactSummaries.slice(-(MAX_CHILD_ARTIFACTS - 1))
+					: [];
+				summaries.push({
+						childId: (clonedArtifact as Record<string, unknown>).childId,
+						role: (clonedArtifact as Record<string, unknown>).role,
+						status: (clonedArtifact as Record<string, unknown>).status,
+						summary,
+					});
+				workspace.childArtifactSummaries = summaries;
+			}
+		};
+
 		const createSandbox = (consoleProxy: ReturnType<typeof createConsoleProxy>, finalState: { value: unknown }) => {
 			const sandbox = Object.create(null);
 			for (const [key, value] of Object.entries(runtimeBindings)) {
@@ -176,7 +223,12 @@ function createWorkerSource() {
 			}
 			sandbox.console = consoleProxy;
 			sandbox.inspectGlobals = () => inspect();
-			sandbox.llmQuery = async (input: unknown) => callParent("llmQuery", { input });
+			sandbox.llmQuery = async (input: unknown) => {
+				const value = await callParent("llmQuery", { input });
+				const { publicValue, childArtifact } = stripInternalLlmQueryResult(value);
+				if (childArtifact) mergeChildArtifactIntoWorkspace(sandbox, childArtifact);
+				return publicValue;
+			};
 			sandbox.final = (value: unknown) => {
 				finalState.value = value;
 				return value;

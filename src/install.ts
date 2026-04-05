@@ -337,6 +337,7 @@ export function createRlmExtensionFactory(options: {
 				"For multi-file or multi-step tasks, use this as the top-level coordinator workspace.",
 				"Persist important state explicitly on globalThis.",
 				"Track goal, plan, files, findings, open questions, and partial outputs in runtime when helpful.",
+				"Child llmQuery artifacts are recorded under globalThis.workspace.childArtifacts; reuse them before repeating child analysis.",
 				"Use direct Pi tools as leaf actions and return here to update the workspace.",
 				"Use console.log() for compact inspection, not huge dumps.",
 				"Recursive child calls use exactly one form: llmQuery({ prompt, role, state, tools, budget, output }).",

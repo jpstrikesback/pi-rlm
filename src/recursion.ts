@@ -17,10 +17,11 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { BUDGET_PRESETS, buildChildPrompt, normalizeLlmQueryInput, parseChildResult } from "./llm-query.js";
-import { buildChildHandoffFromBranch, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
+import { buildChildArtifactFromBranch, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
 import type {
 	LlmQueryRequest,
 	LlmQueryResult,
+	LlmQueryRole,
 	LlmQueryTools,
 	RlmBuiltInToolName,
 	RlmChildProgressEvent,
@@ -31,7 +32,22 @@ const BUILT_IN_TOOL_NAMES: readonly RlmBuiltInToolName[] = ["read", "bash", "edi
 const READ_ONLY_TOOL_NAMES: RlmBuiltInToolName[] = ["read", "grep", "find", "ls"];
 const CODING_TOOL_NAMES: RlmBuiltInToolName[] = ["read", "bash", "edit", "write"];
 
-type ChildCheckpoint = ReturnType<typeof buildChildHandoffFromBranch>;
+type ChildArtifactBase = ReturnType<typeof buildChildArtifactFromBranch>;
+
+type ChildArtifact = ChildArtifactBase & {
+	prompt: string;
+	answer: string;
+	summary?: string;
+	data?: Record<string, unknown>;
+	error?: string;
+	state?: Record<string, unknown>;
+};
+
+type ChildResultWithInternal = LlmQueryResult & {
+	__rlmInternal?: {
+		childArtifact?: ChildArtifact;
+	};
+};
 
 type ChildSessionRun = {
 	text: string;
@@ -94,11 +110,11 @@ function buildPromptPreview(prompt: string): string {
 }
 
 function buildResumeSnapshot(
-	checkpoint: ChildCheckpoint | undefined,
+	artifact: ChildArtifactBase | undefined,
 	state: Record<string, unknown> | undefined,
 ): RuntimeSnapshot | undefined {
-	const base = checkpoint?.snapshot
-		? structuredClone(checkpoint.snapshot)
+	const base = artifact?.snapshot
+		? structuredClone(artifact.snapshot)
 		: ({ version: 1, bindings: {}, entries: [] } satisfies RuntimeSnapshot);
 	const hasBaseBindings = Object.keys(base.bindings).length > 0 || base.entries.length > 0;
 	if (state && Object.keys(state).length > 0) {
@@ -113,15 +129,15 @@ function seedSessionManager(
 	sessionManager: SessionManager,
 	options: {
 		state?: Record<string, unknown>;
-		checkpoint?: ChildCheckpoint;
+		artifact?: ChildArtifactBase;
 	},
 ) {
-	const resumeSnapshot = buildResumeSnapshot(options.checkpoint, options.state);
+	const resumeSnapshot = buildResumeSnapshot(options.artifact, options.state);
 	if (resumeSnapshot) {
 		sessionManager.appendCustomEntry(RLM_RUNTIME_TYPE, { snapshot: resumeSnapshot });
 	}
-	if (options.checkpoint?.workspace !== undefined) {
-		sessionManager.appendCustomEntry(RLM_WORKSPACE_TYPE, { workspace: options.checkpoint.workspace });
+	if (options.artifact?.workspace !== undefined) {
+		sessionManager.appendCustomEntry(RLM_WORKSPACE_TYPE, { workspace: options.artifact.workspace });
 	}
 	if (!resumeSnapshot && options.state && Object.keys(options.state).length > 0) {
 		sessionManager.appendCustomEntry("rlm-child-bootstrap", { state: options.state });
@@ -130,19 +146,19 @@ function seedSessionManager(
 
 function buildForcedFinalizePrompt(args: {
 	prompt: string;
-	checkpoint: ChildCheckpoint;
+	artifact: ChildArtifact;
 	outputMode: "text" | "json";
 	schema?: Record<string, string>;
 }): string {
 	const sections: string[] = [];
-	sections.push("You are a recursive RLM child node resuming from an internal checkpoint.");
+	sections.push("You are a recursive RLM child node resuming from previously gathered child state.");
 	sections.push(`Original task:\n${args.prompt}`);
-	if (args.checkpoint.summary) {
-		sections.push(`Checkpoint summary:\n${args.checkpoint.summary}`);
+	if (args.artifact.summary) {
+		sections.push(`Current child summary:\n${args.artifact.summary}`);
 	}
 	sections.push("Rules:");
 	sections.push("- No tools are available in this finalization step.");
-	sections.push("- Use the restored runtime state and checkpoint context only.");
+	sections.push("- Use the restored runtime state and recorded child artifacts only.");
 	sections.push("- Do not continue exploration or ask for more work.");
 	sections.push("- Return the best final answer now.");
 	if (args.outputMode === "json") {
@@ -232,6 +248,49 @@ async function runChildSession(args: {
 	return { text, turns, abortedByBudget };
 }
 
+function buildChildArtifact(
+	sessionManager: SessionManager,
+	options: {
+		childId: string;
+		role: LlmQueryRole;
+		depth: number;
+		turns: number;
+		status: "ok" | "error" | "budget_exhausted";
+		prompt: string;
+		answer: string;
+		summary?: string;
+		data?: Record<string, unknown>;
+		error?: string;
+		state?: Record<string, unknown>;
+	},
+): ChildArtifact {
+	const base = buildChildArtifactFromBranch(sessionManager.getBranch(), {
+		childId: options.childId,
+		role: options.role || "general",
+		depth: options.depth,
+		turns: options.turns,
+		status: options.status,
+	});
+	return {
+		...base,
+		prompt: options.prompt,
+		answer: options.answer,
+		...(options.summary ? { summary: options.summary } : {}),
+		...(options.data ? { data: options.data } : {}),
+		...(options.error ? { error: options.error } : {}),
+		...(options.state ? { state: structuredClone(options.state) } : {}),
+	};
+}
+
+function attachChildArtifact(result: LlmQueryResult, artifact: ChildArtifact): ChildResultWithInternal {
+	return {
+		...result,
+		__rlmInternal: {
+			childArtifact: artifact,
+		},
+	};
+}
+
 export async function runChildQuery(
 	input: LlmQueryRequest,
 	ctx: ExtensionContext,
@@ -279,6 +338,18 @@ export async function runChildQuery(
 		const parsedPrimary = parseChildResult(primary.text, normalized, primary.turns);
 		if (!primary.abortedByBudget || parsedPrimary.ok) {
 			if (parsedPrimary.ok) {
+				const artifact = buildChildArtifact(primarySessionManager, {
+					childId,
+					role: normalized.role,
+					depth: options.depth,
+					turns: primary.turns,
+					status: "ok",
+					prompt: normalized.prompt,
+					answer: parsedPrimary.answer,
+					summary: parsedPrimary.summary,
+					data: parsedPrimary.data,
+					state: normalized.state,
+				});
 				options.onProgress?.({
 					type: "end",
 					childId,
@@ -286,29 +357,46 @@ export async function runChildQuery(
 					turns: primary.turns,
 					summary: parsedPrimary.summary,
 				});
-				return parsedPrimary;
+				return attachChildArtifact(parsedPrimary, artifact);
 			}
+			const artifact = buildChildArtifact(primarySessionManager, {
+				childId,
+				role: normalized.role,
+				depth: options.depth,
+				turns: primary.turns,
+				status: "error",
+				prompt: normalized.prompt,
+				answer: parsedPrimary.answer,
+				summary: parsedPrimary.summary,
+				data: parsedPrimary.data,
+				error: parsedPrimary.error,
+				state: normalized.state,
+			});
 			options.onProgress?.({
 				type: "error",
 				childId,
 				error: parsedPrimary.error || "Child query failed",
 			});
-			return parsedPrimary;
+			return attachChildArtifact(parsedPrimary, artifact);
 		}
 
-		const checkpoint = buildChildHandoffFromBranch(primarySessionManager.getBranch(), {
+		const artifact = buildChildArtifact(primarySessionManager, {
 			childId,
 			role: normalized.role,
 			depth: options.depth,
 			turns: primary.turns,
-			reason: "budget_exhausted",
-			summary: primary.text.trim(),
-			suggestedNextPrompt: normalized.prompt,
+			status: "budget_exhausted",
+			prompt: normalized.prompt,
+			answer: primary.text.trim(),
+			summary: primary.text.trim() || parsedPrimary.summary,
+			data: parsedPrimary.data,
+			error: parsedPrimary.error,
+			state: normalized.state,
 		});
 
 		const finalizeSessionManager = SessionManager.inMemory(ctx.cwd);
 		seedSessionManager(finalizeSessionManager, {
-			checkpoint,
+			artifact,
 			state: normalized.state,
 		});
 
@@ -319,7 +407,7 @@ export async function runChildQuery(
 			tools: [],
 			prompt: buildForcedFinalizePrompt({
 				prompt: normalized.prompt,
-				checkpoint,
+				artifact,
 				outputMode: normalized.output.mode,
 				schema: normalized.output.schema,
 			}),
@@ -331,6 +419,18 @@ export async function runChildQuery(
 		const totalTurns = primary.turns + finalize.turns;
 		const parsedFinal = parseChildResult(finalize.text, normalized, totalTurns);
 		if (parsedFinal.ok) {
+			const finalizedArtifact = buildChildArtifact(finalizeSessionManager, {
+				childId,
+				role: normalized.role,
+				depth: options.depth,
+				turns: totalTurns,
+				status: "ok",
+				prompt: normalized.prompt,
+				answer: parsedFinal.answer,
+				summary: parsedFinal.summary,
+				data: parsedFinal.data,
+				state: normalized.state,
+			});
 			options.onProgress?.({
 				type: "end",
 				childId,
@@ -338,10 +438,10 @@ export async function runChildQuery(
 				turns: totalTurns,
 				summary: parsedFinal.summary,
 			});
-			return parsedFinal;
+			return attachChildArtifact(parsedFinal, finalizedArtifact);
 		}
 
-		const fallbackAnswer = finalize.text.trim() || checkpoint.summary || primary.text.trim();
+		const fallbackAnswer = finalize.text.trim() || artifact.summary || primary.text.trim();
 		const errorMessage = `Child query exceeded maxTurns (${maxTurns}) before producing a final answer`;
 		const result: LlmQueryResult = {
 			ok: false,
@@ -351,12 +451,24 @@ export async function runChildQuery(
 			usage: { turns: totalTurns },
 			error: errorMessage,
 		};
+		const finalizedArtifact = buildChildArtifact(finalizeSessionManager, {
+			childId,
+			role: normalized.role,
+			depth: options.depth,
+			turns: totalTurns,
+			status: finalize.abortedByBudget ? "budget_exhausted" : "error",
+			prompt: normalized.prompt,
+			answer: fallbackAnswer,
+			summary: fallbackAnswer || undefined,
+			error: errorMessage,
+			state: normalized.state,
+		});
 		options.onProgress?.({
 			type: "error",
 			childId,
 			error: errorMessage,
 		});
-		return result;
+		return attachChildArtifact(result, finalizedArtifact);
 	} catch (error) {
 		options.onProgress?.({
 			type: "error",

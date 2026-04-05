@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-	buildChildHandoffFromBranch,
+	buildChildArtifactFromBranch,
 	composeRuntimeSnapshot,
 	findBootstrapSnapshot,
 	findLatestSnapshot,
@@ -198,7 +198,7 @@ describe("restore helpers", () => {
 		expect(findBootstrapSnapshot(ctx)).toBeUndefined();
 	});
 
-	it("builds a child handoff from the latest child branch state", () => {
+	it("builds a child artifact from the latest child branch state", () => {
 		const branch = [
 			{ type: "custom", customType: RLM_RUNTIME_TYPE, data: { snapshot: snapshotA } },
 			{ type: "custom", customType: RLM_WORKSPACE_TYPE, data: { workspace: { goal: "refactor", done: ["scan"] } } },
@@ -206,14 +206,12 @@ describe("restore helpers", () => {
 		];
 
 		expect(
-			buildChildHandoffFromBranch(branch, {
+			buildChildArtifactFromBranch(branch, {
 				childId: "child-1",
 				role: "worker",
 				depth: 1,
 				turns: 4,
-				reason: "budget_exhausted",
-				summary: "Scanned target files",
-				suggestedNextPrompt: "Continue from checkpoint",
+				status: "budget_exhausted",
 			}),
 		).toEqual({
 			version: 1,
@@ -221,11 +219,9 @@ describe("restore helpers", () => {
 			role: "worker",
 			depth: 1,
 			turns: 4,
-			reason: "budget_exhausted",
+			status: "budget_exhausted",
 			snapshot: snapshotB,
 			workspace: { goal: "refactor", done: ["scan"] },
-			summary: "Scanned target files",
-			suggestedNextPrompt: "Continue from checkpoint",
 		});
 	});
 });

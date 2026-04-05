@@ -50,16 +50,14 @@ export function findLatestWorkspace(ctx: ExtensionContext): Record<string, unkno
 	return findLatestWorkspaceInBranch(ctx.sessionManager.getBranch());
 }
 
-export function buildChildHandoffFromBranch(
+export function buildChildArtifactFromBranch(
 	branch: unknown[],
 	options: {
 		childId: string;
 		role: LlmQueryRole;
 		depth: number;
 		turns: number;
-		reason: "partial" | "budget_exhausted" | "error";
-		summary?: string;
-		suggestedNextPrompt?: string;
+		status: "ok" | "error" | "budget_exhausted";
 	},
 ): {
 	version: 1;
@@ -67,11 +65,9 @@ export function buildChildHandoffFromBranch(
 	role: LlmQueryRole;
 	depth: number;
 	turns: number;
-	reason: "partial" | "budget_exhausted" | "error";
+	status: "ok" | "error" | "budget_exhausted";
 	snapshot?: RuntimeSnapshot;
 	workspace?: Record<string, unknown> | null;
-	summary?: string;
-	suggestedNextPrompt?: string;
 } {
 	const snapshot = findLatestSnapshotInBranch(branch);
 	const latestWorkspace = findLatestWorkspaceInBranch(branch);
@@ -82,11 +78,9 @@ export function buildChildHandoffFromBranch(
 		role: options.role,
 		depth: options.depth,
 		turns: options.turns,
-		reason: options.reason,
+		status: options.status,
 		...(snapshot ? { snapshot } : {}),
 		...(workspace !== undefined ? { workspace } : {}),
-		...(options.summary ? { summary: options.summary } : {}),
-		...(options.suggestedNextPrompt ? { suggestedNextPrompt: options.suggestedNextPrompt } : {}),
 	};
 }
 

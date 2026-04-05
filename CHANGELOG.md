@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Automatically persist child `llmQuery` artifacts into
+  `globalThis.workspace.childArtifacts` and related stable workspace fields, so
+  parent coordinators can reuse child work.
+- Update RLM coordinator guidance to reuse recorded child artifacts before
+  repeating analysis.
+
 ## [0.1.3] - 2026-04-04
 
 ### Changed

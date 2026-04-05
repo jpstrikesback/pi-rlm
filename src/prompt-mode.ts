@@ -31,6 +31,7 @@ Coordinator rules:
 - persist important state on globalThis
 - keep large working state in runtime, not prose
 - keep goal, files, findings, plan, and open questions in runtime when helpful
+- child llmQuery artifacts are recorded under globalThis.workspace.childArtifacts; reuse them before rediscovering work
 - use llmQuery({ prompt, role, state, tools, budget, output }) for child semantic work when useful
 - batch child work and avoid many tiny llmQuery calls
 `,
@@ -47,6 +48,7 @@ Top-level strategy:
 3. Use direct Pi tools as leaf actions to inspect or modify the repository.
 4. Return to rlm_exec to update the workspace after leaf actions.
 5. Use llmQuery({ prompt, role, state, tools, budget, output }) for subproblems that benefit from separate semantic work.
+6. Reuse child artifacts from globalThis.workspace.childArtifacts before re-running child analysis.
 
 Important:
 - do not keep the main working set in prose when runtime would be better
@@ -67,6 +69,7 @@ Default workflow:
 3. Use direct Pi tools only as leaf actions.
 4. After leaf actions, return to rlm_exec and update the workspace.
 5. Use llmQuery({ prompt, role, state, tools, budget, output }) selectively for semantic subproblems, but batch work into fewer larger calls.
+6. Reuse child artifacts from globalThis.workspace.childArtifacts before re-running child analysis.
 
 Strong preferences:
 - keep conversation prose brief and keep the working set in runtime
