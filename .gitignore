@@ -20,5 +20,11 @@ build/
 # Test coverage
 coverage/
 
+# Eval outputs
+/eval/artifacts/*
+!/eval/artifacts/.gitkeep
+/eval/results/*
+!/eval/results/.gitkeep
+
 # IDE (optional local junk)
 .idea/
