@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-04-06
+
 ### Added
 
 - Shared internal workspace/metadata layer for RLM coordination via `globalThis.workspace`, including
