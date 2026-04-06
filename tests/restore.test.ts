@@ -94,7 +94,14 @@ describe("restore helpers", () => {
 		];
 
 		expect(findLatestSnapshotInBranch(branch)).toEqual(snapshotB);
-		expect(findLatestWorkspaceInBranch(branch)).toEqual({ goal: "a" });
+		expect(findLatestWorkspaceInBranch(branch)).toEqual(
+			expect.objectContaining({
+				goal: "a",
+				childArtifacts: [],
+				childArtifactSummaries: [],
+				meta: { version: 1 },
+			}),
+		);
 	});
 
 	it("finds the latest persisted workspace entry", () => {
@@ -112,7 +119,14 @@ describe("restore helpers", () => {
 			},
 		]);
 
-		expect(findLatestWorkspace(ctx)).toEqual(workspace);
+		expect(findLatestWorkspace(ctx)).toEqual(
+			expect.objectContaining({
+				...workspace,
+				childArtifacts: [],
+				childArtifactSummaries: [],
+				meta: { version: 1 },
+			}),
+		);
 	});
 
 	it("returns null when the latest workspace entry clears persisted workspace", () => {
@@ -221,7 +235,13 @@ describe("restore helpers", () => {
 			turns: 4,
 			status: "budget_exhausted",
 			snapshot: snapshotB,
-			workspace: { goal: "refactor", done: ["scan"] },
+			workspace: expect.objectContaining({
+				goal: "refactor",
+				done: ["scan"],
+				childArtifacts: [],
+				childArtifactSummaries: [],
+				meta: { version: 1 },
+			}),
 		});
 	});
 });

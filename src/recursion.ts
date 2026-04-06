@@ -17,14 +17,17 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { BUDGET_PRESETS, buildChildPrompt, normalizeLlmQueryInput, parseChildResult } from "./llm-query.js";
-import { buildChildArtifactFromBranch, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
+import { buildChildArtifactFromBranch, composeRuntimeSnapshot, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
+import { buildWorkspaceManifest, ensureWorkspaceShape, splitInternalLlmQueryContext } from "./workspace.js";
 import type {
 	LlmQueryRequest,
 	LlmQueryResult,
 	LlmQueryRole,
 	LlmQueryTools,
 	RlmBuiltInToolName,
+	RlmChildArtifact,
 	RlmChildProgressEvent,
+	RlmWorkspace,
 	RuntimeSnapshot,
 } from "./types.js";
 
@@ -34,14 +37,7 @@ const CODING_TOOL_NAMES: RlmBuiltInToolName[] = ["read", "bash", "edit", "write"
 
 type ChildArtifactBase = ReturnType<typeof buildChildArtifactFromBranch>;
 
-type ChildArtifact = ChildArtifactBase & {
-	prompt: string;
-	answer: string;
-	summary?: string;
-	data?: Record<string, unknown>;
-	error?: string;
-	state?: Record<string, unknown>;
-};
+type ChildArtifact = RlmChildArtifact & ChildArtifactBase;
 
 type ChildResultWithInternal = LlmQueryResult & {
 	__rlmInternal?: {
@@ -112,17 +108,19 @@ function buildPromptPreview(prompt: string): string {
 function buildResumeSnapshot(
 	artifact: ChildArtifactBase | undefined,
 	state: Record<string, unknown> | undefined,
+	workspace: RlmWorkspace | null | undefined,
 ): RuntimeSnapshot | undefined {
 	const base = artifact?.snapshot
 		? structuredClone(artifact.snapshot)
 		: ({ version: 1, bindings: {}, entries: [] } satisfies RuntimeSnapshot);
-	const hasBaseBindings = Object.keys(base.bindings).length > 0 || base.entries.length > 0;
+	const overlaid = composeRuntimeSnapshot(base, workspace ?? artifact?.workspace);
+	const hasBindings = Object.keys(overlaid.bindings).length > 0 || overlaid.entries.length > 0;
 	if (state && Object.keys(state).length > 0) {
-		base.bindings.input = structuredClone(state);
-		base.bindings.parentState = structuredClone(state);
-		return base;
+		overlaid.bindings.input = structuredClone(state);
+		overlaid.bindings.parentState = structuredClone(state);
+		return overlaid;
 	}
-	return hasBaseBindings ? base : undefined;
+	return hasBindings ? overlaid : undefined;
 }
 
 function seedSessionManager(
@@ -130,14 +128,16 @@ function seedSessionManager(
 	options: {
 		state?: Record<string, unknown>;
 		artifact?: ChildArtifactBase;
+		workspace?: RlmWorkspace | null;
 	},
 ) {
-	const resumeSnapshot = buildResumeSnapshot(options.artifact, options.state);
+	const resumeSnapshot = buildResumeSnapshot(options.artifact, options.state, options.workspace);
 	if (resumeSnapshot) {
 		sessionManager.appendCustomEntry(RLM_RUNTIME_TYPE, { snapshot: resumeSnapshot });
 	}
-	if (options.artifact?.workspace !== undefined) {
-		sessionManager.appendCustomEntry(RLM_WORKSPACE_TYPE, { workspace: options.artifact.workspace });
+	const workspace = options.workspace ?? options.artifact?.workspace;
+	if (workspace !== undefined) {
+		sessionManager.appendCustomEntry(RLM_WORKSPACE_TYPE, { workspace });
 	}
 	if (!resumeSnapshot && options.state && Object.keys(options.state).length > 0) {
 		sessionManager.appendCustomEntry("rlm-child-bootstrap", { state: options.state });
@@ -151,14 +151,23 @@ function buildForcedFinalizePrompt(args: {
 	schema?: Record<string, string>;
 }): string {
 	const sections: string[] = [];
+	const workspaceManifest = buildWorkspaceManifest(args.artifact.workspace, {
+		sectionKeys: ["goal", "plan", "files", "findings", "partialOutputs", "childArtifacts"],
+	});
 	sections.push("You are a recursive RLM child node resuming from previously gathered child state.");
 	sections.push(`Original task:\n${args.prompt}`);
+	sections.push("Runtime state access:\n- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState\n- Input alias: globalThis.input");
 	if (args.artifact.summary) {
 		sections.push(`Current child summary:\n${args.artifact.summary}`);
+	}
+	if (workspaceManifest && Object.keys(workspaceManifest.sections).length > 0) {
+		sections.push(`Workspace metadata:\n${JSON.stringify(workspaceManifest, null, 2)}`);
 	}
 	sections.push("Rules:");
 	sections.push("- No tools are available in this finalization step.");
 	sections.push("- Use the restored runtime state and recorded child artifacts only.");
+	sections.push("- Treat prompt metadata as an index to runtime state, not as the full state.");
+	sections.push("- If reusable findings already exist in runtime/workspace, preserve that structure and finalize from it.");
 	sections.push("- Do not continue exploration or ask for more work.");
 	sections.push("- Return the best final answer now.");
 	if (args.outputMode === "json") {
@@ -262,6 +271,7 @@ function buildChildArtifact(
 		data?: Record<string, unknown>;
 		error?: string;
 		state?: Record<string, unknown>;
+		workspace?: RlmWorkspace | null;
 	},
 ): ChildArtifact {
 	const base = buildChildArtifactFromBranch(sessionManager.getBranch(), {
@@ -271,15 +281,22 @@ function buildChildArtifact(
 		turns: options.turns,
 		status: options.status,
 	});
-	return {
+	const workspace = options.workspace ?? base.workspace;
+	const artifact: ChildArtifact = {
 		...base,
+		id: options.childId,
+		childId: options.childId,
+		kind: "child-query",
 		prompt: options.prompt,
 		answer: options.answer,
+		producedAt: new Date().toISOString(),
 		...(options.summary ? { summary: options.summary } : {}),
 		...(options.data ? { data: options.data } : {}),
 		...(options.error ? { error: options.error } : {}),
 		...(options.state ? { state: structuredClone(options.state) } : {}),
+		...(workspace !== undefined ? { workspace: workspace === null ? null : ensureWorkspaceShape(structuredClone(workspace)) } : {}),
 	};
+	return artifact;
 }
 
 function attachChildArtifact(result: LlmQueryResult, artifact: ChildArtifact): ChildResultWithInternal {
@@ -302,7 +319,9 @@ export async function runChildQuery(
 		onProgress?: (event: RlmChildProgressEvent) => void;
 	},
 ): Promise<LlmQueryResult> {
-	const normalized = normalizeLlmQueryInput(input);
+	const { publicInput, workspace: inputWorkspace } = splitInternalLlmQueryContext(input as unknown);
+	const normalized = normalizeLlmQueryInput(publicInput as LlmQueryRequest);
+	const parentWorkspace = inputWorkspace === undefined ? undefined : inputWorkspace === null ? null : ensureWorkspaceShape(inputWorkspace);
 	const maxDepth = normalized.budget.maxDepth ?? options.maxDepth;
 	if (options.depth > maxDepth) {
 		throw new Error(`Max recursion depth reached (${maxDepth})`);
@@ -318,7 +337,7 @@ export async function runChildQuery(
 
 	try {
 		const primarySessionManager = SessionManager.inMemory(ctx.cwd);
-		seedSessionManager(primarySessionManager, { state: normalized.state });
+		seedSessionManager(primarySessionManager, { state: normalized.state, workspace: parentWorkspace });
 
 		const builtInToolNames = resolveBuiltInToolNames(normalized.tools, options.parentActiveTools);
 		const builtInTools = buildBuiltInTools(ctx.cwd, builtInToolNames);
@@ -329,7 +348,7 @@ export async function runChildQuery(
 			extensionFactory: options.extensionFactory,
 			sessionManager: primarySessionManager,
 			tools: builtInTools,
-			prompt: buildChildPrompt(normalized),
+			prompt: buildChildPrompt(normalized, { workspace: parentWorkspace }),
 			childId,
 			maxTurns,
 			onProgress: options.onProgress,

@@ -5,7 +5,14 @@ import type {
 	LlmQueryRequest,
 	LlmQueryResult,
 	NormalizedLlmQueryRequest,
+	RlmWorkspace,
 } from "./types.js";
+import {
+	buildStateManifest,
+	buildWorkspaceManifest,
+	selectRelevantArtifacts,
+	selectRelevantWorkspaceSectionKeys,
+} from "./workspace.js";
 
 export const BUDGET_PRESETS: Record<LlmQueryBudgetPreset, LlmQueryBudget> = {
 	low: { maxDepth: 1, maxTurns: 3 },
@@ -56,22 +63,39 @@ export function normalizeLlmQueryInput(input: LlmQueryRequest): NormalizedLlmQue
 	};
 }
 
-export function buildChildPrompt(input: NormalizedLlmQueryRequest): string {
+type BuildChildPromptContext = {
+	workspace?: RlmWorkspace | null;
+};
+
+export function buildChildPrompt(input: NormalizedLlmQueryRequest, context: BuildChildPromptContext = {}): string {
 	const sections: string[] = [];
+	const relevantArtifacts = selectRelevantArtifacts(context.workspace, {
+		prompt: input.prompt,
+		role: input.role,
+	});
+	const workspaceManifest = buildWorkspaceManifest(context.workspace, {
+		sectionKeys: selectRelevantWorkspaceSectionKeys(input.role, context.workspace),
+		relevantArtifacts,
+	});
+	const stateManifest = buildStateManifest(input.state);
+
 	sections.push("You are a recursive RLM child node.");
 	sections.push(`Role: ${input.role}`);
-	sections.push(`Prompt:\n${input.prompt}`);
-
-	if (input.state && Object.keys(input.state).length > 0) {
-		sections.push(
-			`Parent-provided state is available both in this prompt and in runtime as globalThis.input / globalThis.parentState:\n${JSON.stringify(input.state, null, 2)}`,
-		);
+	sections.push(`Task:\n${input.prompt}`);
+	sections.push("Runtime state access:\n- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState\n- Input alias: globalThis.input");
+	if (stateManifest) {
+		sections.push(`Parent state metadata:\n${JSON.stringify(stateManifest, null, 2)}`);
+	}
+	if (workspaceManifest && Object.keys(workspaceManifest.sections).length > 0) {
+		sections.push(`Workspace metadata:\n${JSON.stringify(workspaceManifest, null, 2)}`);
 	}
 
 	sections.push("Rules:");
 	sections.push("- Solve only the requested subproblem.");
-	sections.push("- Reuse provided parent state before rediscovering information.");
-	sections.push("- Keep the answer compact and useful to the parent.");
+	sections.push("- Treat prompt metadata as an index to runtime state, not as the full state.");
+	sections.push("- Reuse existing runtime state and child artifacts before rediscovering information.");
+	sections.push("- If you use rlm_exec, store reusable intermediate findings in globalThis.workspace (for example findings, files, partialOutputs, or openQuestions) before finalizing.");
+	sections.push("- Keep the final answer compact, structured, and easy for the parent to reuse.");
 	if (input.budget.maxTurns) sections.push(`- Finish within ${input.budget.maxTurns} turns.`);
 
 	if (input.output.mode === "json") {

@@ -31,21 +31,52 @@ describe("llmQuery normalization", () => {
 });
 
 describe("buildChildPrompt", () => {
-	it("includes role, prompt, state, and json schema guidance", () => {
+	it("includes role, runtime access, metadata manifests, and json schema guidance", () => {
 		const prompt = buildChildPrompt(
 			normalizeLlmQueryInput({
 				prompt: "Summarize these files",
 				role: "scout",
-				state: { files: ["a.ts", "b.ts"] },
+				state: { files: ["a.ts", "b.ts"], findings: { auth: true } },
 				budget: { maxTurns: 3 },
 				output: { mode: "json", schema: { summary: "string" } },
 			}),
+			{
+				workspace: {
+					goal: "refactor",
+					files: ["src/a.ts", "src/b.ts"],
+					findings: ["auth shared"],
+					childArtifacts: [
+						{
+							version: 1,
+							id: "child-1",
+							childId: "child-1",
+							kind: "child-query",
+							role: "scout",
+							depth: 1,
+							turns: 2,
+							status: "ok",
+							prompt: "scan auth",
+							answer: "done",
+							summary: "auth summary",
+							files: ["src/auth.ts"],
+							tags: ["auth"],
+							producedAt: "2026-04-04T00:00:00.000Z",
+						},
+					],
+				},
+			},
 		);
 
 		expect(prompt).toContain("Role: scout");
-		expect(prompt).toContain("Prompt:\nSummarize these files");
-		expect(prompt).toContain("globalThis.input / globalThis.parentState");
-		expect(prompt).toContain('"files": [');
+		expect(prompt).toContain("Task:\nSummarize these files");
+		expect(prompt).toContain("Durable notebook: globalThis.workspace");
+		expect(prompt).toContain("Parent state metadata:");
+		expect(prompt).toContain("Workspace metadata:");
+		expect(prompt).toContain('"path": "globalThis.parentState"');
+		expect(prompt).toContain('"workspacePath": "globalThis.workspace"');
+		expect(prompt).toContain('"id": "child-1"');
+		expect(prompt).toContain("Treat prompt metadata as an index to runtime state");
+		expect(prompt).toContain("store reusable intermediate findings in globalThis.workspace");
 		expect(prompt).toContain("Return valid JSON only");
 		expect(prompt).toContain('"summary": "string"');
 		expect(prompt).toContain("Finish within 3 turns.");

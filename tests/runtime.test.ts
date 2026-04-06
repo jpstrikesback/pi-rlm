@@ -89,18 +89,21 @@ describe("RuntimeSession", () => {
 		expect(inspection.table).not.toContain("final");
 	});
 
-	it("wires llmQuery through the runtime hook", async () => {
+	it("wires llmQuery through the runtime hook and forwards live workspace context internally", async () => {
 		const runtime = createRuntime();
 
 		const result = await runtime.exec(
 			`
+			globalThis.workspace = { goal: "refactor", files: ["src/auth.ts"] };
 			const child = await llmQuery({ prompt: "increment", output: { mode: "json" } });
 			globalThis.child = child;
 			final(child.data.value);
 			`,
 			{
-				llmQuery: async (input) => {
+				llmQuery: async (input: any) => {
 					expect(input.prompt).toBe("increment");
+					expect(input.__rlmRuntimeContext.workspace.goal).toBe("refactor");
+					expect(input.__rlmRuntimeContext.workspace.files).toEqual(["src/auth.ts"]);
 					return {
 						ok: true,
 						answer: JSON.stringify({ value: 42, summary: "done" }),
@@ -163,6 +166,11 @@ describe("RuntimeSession", () => {
 			lastSummary: "child done",
 			childSummary: "child done",
 		});
+		const inspection = await runtime.inspect();
+		expect(inspection.table).toContain("workspace");
+		const workspace = runtime.getSnapshot().bindings.workspace as any;
+		expect(workspace.artifactIndex.recentIds).toEqual(["child-1"]);
+		expect(workspace.childArtifactSummaries[0].id).toBe("child-1");
 	});
 
 	it("returns execution errors without losing finalValue if final was already set", async () => {

@@ -19,6 +19,7 @@ import { runChildQuery } from "./recursion.js";
 import { composeRuntimeSnapshot, findBootstrapSnapshot, findLatestSnapshot, findLatestWorkspace, getSessionRuntimeKey, RLM_WORKSPACE_TYPE } from "./restore.js";
 import { RuntimeManager } from "./runtime.js";
 import { collectRlmSessionStats } from "./stats.js";
+import { ensureWorkspaceShape } from "./workspace.js";
 import type {
 	ExecResult,
 	GlobalsInspection,
@@ -29,6 +30,7 @@ import type {
 	RlmPromptMode,
 	RlmSessionStats,
 	RlmToolDetails,
+	RlmWorkspace,
 	RuntimeSnapshot,
 } from "./types.js";
 
@@ -133,12 +135,12 @@ function computeStats(ctx: ExtensionContext, options: { depth: number; maxDepth:
 	return collectRlmSessionStats(ctx, options, snapshot);
 }
 
-function normalizeWorkspaceBinding(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" ? (structuredClone(value) as Record<string, unknown>) : undefined;
+function normalizeWorkspaceBinding(value: unknown): RlmWorkspace | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? ensureWorkspaceShape(structuredClone(value)) : undefined;
 }
 
-function markRunningChildrenInterrupted(workspace: Record<string, unknown>): Record<string, unknown> {
-	const next = structuredClone(workspace) as Record<string, unknown>;
+function markRunningChildrenInterrupted(workspace: RlmWorkspace): RlmWorkspace {
+	const next = ensureWorkspaceShape(structuredClone(workspace));
 	const children = next.children;
 	if (!Array.isArray(children)) return next;
 	next.children = children.map((child) => {
@@ -219,8 +221,8 @@ function renderChildLine(child: RlmChildActivity, theme: any, expanded: boolean)
 
 function persistWorkspaceEntry(
 	pi: ExtensionAPI,
-	currentWorkspace: Record<string, unknown> | undefined,
-	previousWorkspace: Record<string, unknown> | null | undefined,
+	currentWorkspace: RlmWorkspace | undefined,
+	previousWorkspace: RlmWorkspace | null | undefined,
 ) {
 	const nextWorkspace = currentWorkspace ?? null;
 	const lastWorkspace = previousWorkspace ?? null;
@@ -332,12 +334,14 @@ export function createRlmExtensionFactory(options: {
 			description:
 				"Execute JavaScript in a persistent runtime with live variables. Persist state by assigning to globalThis.<name>.",
 			promptSnippet:
-				"Use this as the persistent coordinator workspace for multi-file or multi-step tasks. Helpers: final(), inspectGlobals(), llmQuery({ prompt, ... }).",
+				"Use this as the persistent coordinator workspace for multi-file or multi-step tasks. Keep durable state in globalThis.workspace. Helpers: final(), inspectGlobals(), llmQuery({ prompt, ... }).",
 			promptGuidelines: [
 				"For multi-file or multi-step tasks, use this as the top-level coordinator workspace.",
-				"Persist important state explicitly on globalThis.",
-				"Track goal, plan, files, findings, open questions, and partial outputs in runtime when helpful.",
-				"Child llmQuery artifacts are recorded under globalThis.workspace.childArtifacts; reuse them before repeating child analysis.",
+				"Use globalThis.workspace as the main notebook for durable state; keep short-lived scratch values elsewhere only when useful.",
+				"Track goal, plan, files, findings, openQuestions, partialOutputs, and childArtifacts in globalThis.workspace when helpful.",
+				"Treat prompt metadata as an index to runtime state, not as a replacement for runtime state.",
+				"Child llmQuery artifacts are recorded under globalThis.workspace.childArtifacts; review and reuse them before repeating child analysis.",
+				"After child work, consolidate the important parts into workspace.findings or workspace.partialOutputs.",
 				"Use direct Pi tools as leaf actions and return here to update the workspace.",
 				"Use console.log() for compact inspection, not huge dumps.",
 				"Recursive child calls use exactly one form: llmQuery({ prompt, role, state, tools, budget, output }).",

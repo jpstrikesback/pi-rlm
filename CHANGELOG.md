@@ -4,11 +4,22 @@
 
 ### Added
 
-- Automatically persist child `llmQuery` artifacts into
-  `globalThis.workspace.childArtifacts` and related stable workspace fields, so
-  parent coordinators can reuse child work.
-- Update RLM coordinator guidance to reuse recorded child artifacts before
-  repeating analysis.
+- Shared internal workspace/metadata layer for RLM coordination via `globalThis.workspace`, including
+  canonical child artifact indexing and manifest generation.
+- New internal workspace helpers for normalization, artifact recording, relevant artifact selection, and
+  hidden child runtime-context transport.
+- Coverage for the shared workspace/manifest layer in new and expanded tests.
+
+### Changed
+
+- Child `llmQuery` prompts now use runtime access instructions plus compact state/workspace manifests,
+  treating prompt metadata as an index to runtime state.
+- Parent runtimes now pass the live workspace internally into child `llmQuery` calls so parent, child, and
+  descendant runtimes share the same internal state contract.
+- Child artifact persistence now updates stable workspace structures including `childArtifacts`,
+  `childArtifactSummaries`, `lastChildArtifact`, `artifactIndex`, and workspace metadata.
+- RLM coordinator guidance now consistently uses `globalThis.workspace` as the durable notebook and
+  emphasizes consolidating child results back into workspace state.
 
 ## [0.1.3] - 2026-04-04
 

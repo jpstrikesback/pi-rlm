@@ -26,6 +26,7 @@ function createWorkerSource() {
 		const MAX_LOG_LINES = 200;
 		const MAX_CHILD_ARTIFACTS = 24;
 		const INTERNAL_CHILD_ARTIFACT_KEY = "__rlmInternal";
+		const INTERNAL_LLM_QUERY_CONTEXT_KEY = "__rlmRuntimeContext";
 		const DANGEROUS_GLOBALS = [
 			"process",
 			"require",
@@ -173,10 +174,59 @@ function createWorkerSource() {
 
 		const ensureWorkspace = (sandbox: Record<string, unknown>) => {
 			const current = sandbox.workspace;
-			if (current && typeof current === "object" && !Array.isArray(current)) return current;
-			const workspace = Object.create(null);
+			const workspace = current && typeof current === "object" && !Array.isArray(current) ? current : Object.create(null);
+			if (!Array.isArray(workspace.childArtifacts)) workspace.childArtifacts = [];
+			if (!Array.isArray(workspace.childArtifactSummaries)) workspace.childArtifactSummaries = [];
+			if (!workspace.artifactIndex || typeof workspace.artifactIndex !== "object" || Array.isArray(workspace.artifactIndex)) {
+				workspace.artifactIndex = Object.create(null);
+			}
+			if (!workspace.artifactIndex.byId || typeof workspace.artifactIndex.byId !== "object" || Array.isArray(workspace.artifactIndex.byId)) {
+				workspace.artifactIndex.byId = Object.create(null);
+			}
+			if (!workspace.artifactIndex.byTag || typeof workspace.artifactIndex.byTag !== "object" || Array.isArray(workspace.artifactIndex.byTag)) {
+				workspace.artifactIndex.byTag = Object.create(null);
+			}
+			if (!workspace.artifactIndex.byFile || typeof workspace.artifactIndex.byFile !== "object" || Array.isArray(workspace.artifactIndex.byFile)) {
+				workspace.artifactIndex.byFile = Object.create(null);
+			}
+			if (!Array.isArray(workspace.artifactIndex.recentIds)) workspace.artifactIndex.recentIds = [];
+			if (!workspace.meta || typeof workspace.meta !== "object" || Array.isArray(workspace.meta)) workspace.meta = { version: 1 };
+			workspace.meta.version = 1;
 			sandbox.workspace = workspace;
 			return workspace;
+		};
+
+		const normalizeStringList = (value: unknown) =>
+			Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : undefined;
+
+		const rebuildArtifactIndex = (artifacts: Array<Record<string, unknown>>) => {
+			const byId = Object.create(null);
+			const byTag = Object.create(null);
+			const byFile = Object.create(null);
+			const recentIds: string[] = [];
+			for (const artifact of artifacts) {
+				const id = typeof artifact.id === "string" ? artifact.id : typeof artifact.childId === "string" ? artifact.childId : undefined;
+				if (!id) continue;
+				byId[id] = artifact;
+				recentIds.push(id);
+				for (const tag of normalizeStringList(artifact.tags) || []) {
+					(byTag[tag] ||= []).push(id);
+				}
+				for (const file of normalizeStringList(artifact.files) || []) {
+					(byFile[file] ||= []).push(id);
+				}
+			}
+			return { byId, byTag, byFile, recentIds };
+		};
+
+		const attachRuntimeContextToInput = (input: unknown, sandbox: Record<string, unknown>) => {
+			if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+			const next = Object.assign(Object.create(null), input as Record<string, unknown>);
+			const workspace = sandbox.workspace;
+			if (workspace && typeof workspace === "object" && !Array.isArray(workspace) && canClone(workspace)) {
+				next[INTERNAL_LLM_QUERY_CONTEXT_KEY] = { workspace: structuredClone(workspace) };
+			}
+			return next;
 		};
 
 		const stripInternalLlmQueryResult = (value: unknown) => {
@@ -196,24 +246,36 @@ function createWorkerSource() {
 		const mergeChildArtifactIntoWorkspace = (sandbox: Record<string, unknown>, artifact: unknown) => {
 			if (!artifact || typeof artifact !== "object" || !canClone(artifact)) return;
 			const workspace = ensureWorkspace(sandbox) as Record<string, unknown>;
-			const clonedArtifact = structuredClone(artifact);
+			const clonedArtifact = structuredClone(artifact) as Record<string, unknown>;
+			if (typeof clonedArtifact.id !== "string" && typeof clonedArtifact.childId === "string") clonedArtifact.id = clonedArtifact.childId;
+			const dataFiles = clonedArtifact.data && typeof clonedArtifact.data === "object" && !Array.isArray(clonedArtifact.data)
+				? normalizeStringList((clonedArtifact.data as Record<string, unknown>).files)
+				: undefined;
+			const dataTags = clonedArtifact.data && typeof clonedArtifact.data === "object" && !Array.isArray(clonedArtifact.data)
+				? normalizeStringList((clonedArtifact.data as Record<string, unknown>).tags)
+				: undefined;
+			clonedArtifact.files = normalizeStringList(clonedArtifact.files) || dataFiles;
+			clonedArtifact.tags = normalizeStringList(clonedArtifact.tags) || dataTags;
 			const existing = Array.isArray(workspace.childArtifacts) ? workspace.childArtifacts.slice(-(MAX_CHILD_ARTIFACTS - 1)) : [];
-			existing.push(clonedArtifact);
-			workspace.childArtifacts = existing;
+			const nextArtifacts = [...existing, clonedArtifact];
+			workspace.childArtifacts = nextArtifacts;
 			workspace.lastChildArtifact = clonedArtifact;
-			const summary = (clonedArtifact as Record<string, unknown>).summary;
-			if (typeof summary === "string" && summary.trim()) {
-				const summaries = Array.isArray(workspace.childArtifactSummaries)
-					? workspace.childArtifactSummaries.slice(-(MAX_CHILD_ARTIFACTS - 1))
-					: [];
-				summaries.push({
-						childId: (clonedArtifact as Record<string, unknown>).childId,
-						role: (clonedArtifact as Record<string, unknown>).role,
-						status: (clonedArtifact as Record<string, unknown>).status,
-						summary,
-					});
-				workspace.childArtifactSummaries = summaries;
-			}
+			workspace.childArtifactSummaries = nextArtifacts.map((entry) => ({
+				id: entry.id,
+				childId: entry.childId,
+				role: entry.role,
+				status: entry.status,
+				...(typeof entry.summary === "string" && entry.summary.trim() ? { summary: entry.summary } : {}),
+				...(normalizeStringList(entry.files)?.length ? { files: normalizeStringList(entry.files) } : {}),
+				...(normalizeStringList(entry.tags)?.length ? { tags: normalizeStringList(entry.tags) } : {}),
+				...(typeof entry.producedAt === "string" ? { producedAt: entry.producedAt } : {}),
+			}));
+			workspace.artifactIndex = rebuildArtifactIndex(nextArtifacts);
+			workspace.meta = {
+				...(workspace.meta && typeof workspace.meta === "object" && !Array.isArray(workspace.meta) ? workspace.meta : {}),
+				version: 1,
+				...(typeof clonedArtifact.producedAt === "string" ? { updatedAt: clonedArtifact.producedAt } : {}),
+			};
 		};
 
 		const createSandbox = (consoleProxy: ReturnType<typeof createConsoleProxy>, finalState: { value: unknown }) => {
@@ -224,7 +286,7 @@ function createWorkerSource() {
 			sandbox.console = consoleProxy;
 			sandbox.inspectGlobals = () => inspect();
 			sandbox.llmQuery = async (input: unknown) => {
-				const value = await callParent("llmQuery", { input });
+				const value = await callParent("llmQuery", { input: attachRuntimeContextToInput(input, sandbox) });
 				const { publicValue, childArtifact } = stripInternalLlmQueryResult(value);
 				if (childArtifact) mergeChildArtifactIntoWorkspace(sandbox, childArtifact);
 				return publicValue;

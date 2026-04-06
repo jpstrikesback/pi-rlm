@@ -97,6 +97,89 @@ export type LlmQueryResult = {
 	error?: string;
 };
 
+export type RlmArtifactStatus = "ok" | "error" | "budget_exhausted" | "interrupted";
+
+export type RlmArtifactIndex = {
+	byId?: Record<string, RlmChildArtifact>;
+	byTag?: Record<string, string[]>;
+	byFile?: Record<string, string[]>;
+	recentIds?: string[];
+};
+
+export type RlmWorkspaceMeta = {
+	version: 1;
+	updatedAt?: string;
+};
+
+export type RlmWorkspace = Record<string, unknown> & {
+	goal?: string;
+	plan?: string[];
+	files?: string[];
+	findings?: Array<string | Record<string, unknown>>;
+	openQuestions?: string[];
+	partialOutputs?: Record<string, unknown>;
+	childArtifacts?: RlmChildArtifact[];
+	childArtifactSummaries?: RlmArtifactSummary[];
+	lastChildArtifact?: RlmChildArtifact;
+	artifactIndex?: RlmArtifactIndex;
+	meta?: RlmWorkspaceMeta;
+};
+
+export type RlmChildArtifact = {
+	version: 1;
+	id: string;
+	childId: string;
+	kind: "child-query";
+	role: LlmQueryRole;
+	depth: number;
+	turns: number;
+	status: Exclude<RlmArtifactStatus, "interrupted">;
+	prompt: string;
+	answer: string;
+	summary?: string;
+	data?: Record<string, unknown>;
+	error?: string;
+	state?: Record<string, unknown>;
+	files?: string[];
+	tags?: string[];
+	producedAt: string;
+	snapshot?: RuntimeSnapshot;
+	workspace?: RlmWorkspace | null;
+};
+
+export type RlmArtifactSummary = {
+	id: string;
+	childId: string;
+	role: LlmQueryRole;
+	status: RlmArtifactStatus;
+	summary?: string;
+	files?: string[];
+	tags?: string[];
+	producedAt?: string;
+};
+
+export type RlmValueManifest = {
+	path: string;
+	type: string;
+	length?: number;
+	keyCount?: number;
+	keys?: string[];
+	preview?: unknown;
+};
+
+export type RlmWorkspaceManifest = {
+	version: 1;
+	runtime: {
+		workspacePath: "globalThis.workspace";
+		parentStatePath: "globalThis.parentState";
+		inputPath: "globalThis.input";
+	};
+	sections: Record<string, RlmValueManifest>;
+	artifactCount: number;
+	recentArtifactIds?: string[];
+	relevantArtifacts?: RlmArtifactSummary[];
+};
+
 export type LlmQueryFunction = (input: LlmQueryRequest) => Promise<LlmQueryResult>;
 
 export type RlmChildProgressEvent =

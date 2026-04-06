@@ -52,7 +52,8 @@ describe("prompt modes", () => {
 	it("builds an aggressive appendix that pushes runtime-first behavior", () => {
 		const appendix = buildRlmModeAppendix("aggressive");
 		expect(appendix).toContain("Unless the task is clearly a one-shot");
-		expect(appendix).toContain("globalThis.goal");
+		expect(appendix).toContain("globalThis.workspace.goal");
+		expect(appendix).toContain("workspace.findings");
 		expect(appendix).toContain("not a stateless tool caller");
 	});
 });
