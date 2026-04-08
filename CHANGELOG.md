@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-04-07
+
+### Added
+
+- Context retention with active workspace pointers
+- Workspace-aware compaction and retention persistence
+- Retention leases, consolidation refs, and tool-surface results
+- New `context-retention` module and expanded tests
+- Simple eval harness and scenarios
+
+### Changed
+
+- Tool outputs routed through workspace
+
 ## [0.1.4] - 2026-04-06
 
 ### Added
