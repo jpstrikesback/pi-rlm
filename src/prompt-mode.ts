@@ -30,7 +30,8 @@ Use rlm_exec as the place where you coordinate the task and keep the working set
 Coordinator rules:
 - use globalThis.workspace as the main notebook for durable state
 - keep large working state in runtime, not prose
-- store goal, plan, files, findings, openQuestions, partialOutputs, and childArtifacts under globalThis.workspace when helpful
+- store goal, plan, files, findings, openQuestions, partialOutputs, childArtifacts, and activeContext under globalThis.workspace when helpful
+- inspect globalThis.workspace.activeContext first when you need the current working set
 - treat prompt metadata as an index to runtime state, not as a replacement for runtime state
 - before launching new child work, review globalThis.workspace.childArtifacts and reuse or consolidate what is already known
 - use llmQuery({ prompt, role, state, tools, budget, output }) for semantic subproblems when useful
@@ -45,12 +46,12 @@ For any multi-file, multi-step, or long-horizon task, begin by opening or updati
 
 Top-level strategy:
 1. Start in rlm_exec.
-2. Use globalThis.workspace as the main notebook for goal, current plan, files of interest, findings, openQuestions, partialOutputs, and childArtifacts.
+2. Use globalThis.workspace as the main notebook for goal, current plan, files of interest, findings, openQuestions, partialOutputs, childArtifacts, and activeContext.
 3. Use direct Pi tools as leaf actions to inspect or modify the repository.
 4. Return to rlm_exec after leaf actions to update and consolidate the workspace.
 5. Use llmQuery({ prompt, role, state, tools, budget, output }) for semantic subproblems.
 6. Before re-running child analysis, review globalThis.workspace.childArtifacts and merge useful results into workspace.findings or workspace.partialOutputs.
-7. Treat prompt metadata as an index to runtime state and inspect globalThis.workspace when details matter.
+7. Inspect globalThis.workspace.activeContext first and treat prompt metadata as an index to runtime state when details matter.
 
 Important:
 - do not keep the main working set in prose when runtime would be better
@@ -67,12 +68,12 @@ Unless the task is clearly a one-shot read/edit/write operation, start in rlm_ex
 
 Default workflow:
 1. Open rlm_exec first.
-2. Create or update globalThis.workspace.goal, globalThis.workspace.plan, globalThis.workspace.files, globalThis.workspace.findings, globalThis.workspace.openQuestions, globalThis.workspace.partialOutputs, and globalThis.workspace.childArtifacts as needed.
+2. Create or update globalThis.workspace.goal, globalThis.workspace.plan, globalThis.workspace.files, globalThis.workspace.findings, globalThis.workspace.openQuestions, globalThis.workspace.partialOutputs, globalThis.workspace.childArtifacts, and globalThis.workspace.activeContext as needed.
 3. Use direct Pi tools only as leaf actions.
 4. After leaf actions, return to rlm_exec and update or consolidate the workspace.
 5. Use llmQuery({ prompt, role, state, tools, budget, output }) selectively for semantic subproblems, but batch work into fewer larger calls.
 6. Reuse child artifacts from globalThis.workspace.childArtifacts before re-running child analysis, and fold the important parts back into workspace.findings or workspace.partialOutputs.
-7. Treat prompt metadata as an index to runtime state and inspect globalThis.workspace when details matter.
+7. Inspect globalThis.workspace.activeContext first and treat prompt metadata as an index to runtime state when details matter.
 
 Strong preferences:
 - keep conversation prose brief and keep the working set in runtime

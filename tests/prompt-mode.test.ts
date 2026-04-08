@@ -47,12 +47,14 @@ describe("prompt modes", () => {
 		expect(appendix).toContain("top-level coordinator");
 		expect(appendix).toContain("Start in rlm_exec");
 		expect(appendix).toContain("Use direct Pi tools as leaf actions");
+		expect(appendix).toContain("globalThis.workspace.activeContext");
 	});
 
 	it("builds an aggressive appendix that pushes runtime-first behavior", () => {
 		const appendix = buildRlmModeAppendix("aggressive");
 		expect(appendix).toContain("Unless the task is clearly a one-shot");
 		expect(appendix).toContain("globalThis.workspace.goal");
+		expect(appendix).toContain("globalThis.workspace.activeContext");
 		expect(appendix).toContain("workspace.findings");
 		expect(appendix).toContain("not a stateless tool caller");
 	});

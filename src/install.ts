@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
 	ExtensionAPI,
@@ -19,7 +20,8 @@ import { runChildQuery } from "./recursion.js";
 import { composeRuntimeSnapshot, findBootstrapSnapshot, findLatestSnapshot, findLatestWorkspace, getSessionRuntimeKey, RLM_WORKSPACE_TYPE } from "./restore.js";
 import { RuntimeManager } from "./runtime.js";
 import { collectRlmSessionStats } from "./stats.js";
-import { ensureWorkspaceShape } from "./workspace.js";
+import { applyRetentionPolicy, buildRetentionCompactionSummary, DEFAULT_RLM_RETENTION_POLICY, RLM_RETENTION_TYPE } from "./context-retention.js";
+import { buildWorkspaceWorkingSetSummary, ensureWorkspaceShape, recordRetentionLease, recordRetentionMetrics } from "./workspace.js";
 import type {
 	ExecResult,
 	GlobalsInspection,
@@ -27,9 +29,12 @@ import type {
 	LlmQueryRequest,
 	RlmChildActivity,
 	RlmChildProgressEvent,
+	RlmConsolidationRef,
 	RlmPromptMode,
+	RlmRetentionEntry,
 	RlmSessionStats,
 	RlmToolDetails,
+	RlmToolSurfaceResult,
 	RlmWorkspace,
 	RuntimeSnapshot,
 } from "./types.js";
@@ -49,19 +54,50 @@ function safePreview(value: unknown): string {
 	}
 }
 
-function formatExecResult(result: ExecResult): string {
-	const parts: string[] = [];
-	parts.push(result.ok ? "Execution succeeded." : "Execution failed.");
-	if (result.error) parts.push(`\nerror:\n${result.error}`);
-	if (result.stdout) parts.push(`\nstdout:\n${result.stdout}`);
-	if (result.returnValuePreview) parts.push(`\nreturn:\n${result.returnValuePreview}`);
-	if (result.finalValue !== undefined) parts.push(`\nfinal:\n${safePreview(result.finalValue)}`);
-	parts.push(`\nruntime:\n${result.inspection.table}`);
-	return parts.join("\n");
+function hashFingerprint(input: string): string {
+	return createHash("sha1").update(input).digest("hex").slice(0, 12);
 }
 
-function formatInspection(inspection: GlobalsInspection): string {
-	return `RLM runtime\n\n${inspection.table}`;
+function extractAssistantText(message: { content?: unknown }): string {
+	const content = message.content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((block): block is { type: "text"; text: string } => !!block && typeof block === "object" && block.type === "text" && typeof block.text === "string")
+		.map((block) => block.text)
+		.join("\n");
+}
+
+function buildAssistantFingerprint(message: { role?: string; timestamp?: number; content?: unknown }): string {
+	const text = extractAssistantText(message);
+	const timestamp = typeof message.timestamp === "number" ? message.timestamp : 0;
+	return hashFingerprint([message.role ?? "assistant", timestamp, text.length, text.slice(0, 200)].join(":"));
+}
+
+function buildToolFingerprint(input: { toolName: string; toolCallId: string; isError: boolean }): string {
+	return hashFingerprint([input.toolName, input.toolCallId, input.isError ? "error" : "ok"].join(":"));
+}
+
+function buildSurfaceText(surface: RlmToolSurfaceResult): string {
+	if (!surface.refs || surface.refs.length === 0) return surface.text;
+	const refs = surface.refs.map((ref) => ref.ref).join(", ");
+	return `${surface.text}\nRefs: ${refs}`;
+}
+
+function buildExecSurfaceResult(result: ExecResult): RlmToolSurfaceResult {
+	if (!result.ok) return { text: "Execution failed." };
+	if (result.snapshot.bindings.workspace) {
+		const refs: RlmConsolidationRef[] = [{ kind: "workspace-path", ref: "globalThis.workspace" }];
+		return { text: "Execution succeeded. Workspace updated.", refs };
+	}
+	return { text: "Execution succeeded." };
+}
+
+function buildInspectionSurfaceResult(inspection: GlobalsInspection): RlmToolSurfaceResult {
+	return {
+		text: `RLM runtime inspection complete. ${inspection.entries.length} binding${inspection.entries.length === 1 ? "" : "s"} available.`,
+		refs: [{ kind: "workspace-path", ref: "globalThis.workspace" }],
+	};
 }
 
 function findRlmModeEnabled(ctx: ExtensionContext): boolean {
@@ -78,7 +114,7 @@ function findRlmModeEnabled(ctx: ExtensionContext): boolean {
 function formatStats(stats: RlmSessionStats): string {
 	const mode = getRlmPromptModeLabel(stats.promptMode);
 	const child = stats.childTurns > 0 ? `${stats.childQueryCount}/${stats.childTurns}t` : `${stats.childQueryCount}`;
-	return `RLM ${mode} · d ${stats.depth}/${stats.maxDepth} · exec ${stats.execCount} · child ${child} · vars ${stats.runtimeVarCount} · leaf ${stats.leafToolCount}`;
+	return `RLM ${mode} · d ${stats.depth}/${stats.maxDepth} · exec ${stats.execCount} · child ${child} · vars ${stats.runtimeVarCount} · act ${stats.activeContextRefCount} · leaf ${stats.leafToolCount}`;
 }
 
 function applyModeWidget(ctx: ExtensionContext, enabled: boolean, promptMode: RlmPromptMode, root: boolean) {
@@ -107,7 +143,7 @@ function applyStatus(
 	const header = theme.fg("accent", `RLM ${getRlmPromptModeLabel(promptMode)}`);
 	const details = theme.fg(
 		"dim",
-		` · d ${nextStats.depth}/${nextStats.maxDepth} · exec ${nextStats.execCount} · child ${nextStats.childTurns > 0 ? `${nextStats.childQueryCount}/${nextStats.childTurns}t` : `${nextStats.childQueryCount}`} · vars ${nextStats.runtimeVarCount} · leaf ${nextStats.leafToolCount}`,
+		` · d ${nextStats.depth}/${nextStats.maxDepth} · exec ${nextStats.execCount} · child ${nextStats.childTurns > 0 ? `${nextStats.childQueryCount}/${nextStats.childTurns}t` : `${nextStats.childQueryCount}`} · vars ${nextStats.runtimeVarCount} · act ${nextStats.activeContextRefCount} · leaf ${nextStats.leafToolCount}`,
 	);
 	ctx.ui.setStatus("rlm-stats", header + details);
 }
@@ -269,6 +305,10 @@ export function createRlmExtensionFactory(options: {
 		const initializedKeys = new Set<string>();
 		let rlmModeEnabled = !options.root;
 		let rlmPromptMode = options.promptMode ?? DEFAULT_RLM_PROMPT_MODE;
+		let activeTurnIndex = 0;
+		let pendingRetentionEntry: RlmRetentionEntry | undefined;
+		let emittedRetentionTurnIndex = -1;
+		let pendingWorkspace: RlmWorkspace | undefined;
 
 		const persistMode = (enabled: boolean) => {
 			rlmModeEnabled = enabled;
@@ -280,10 +320,92 @@ export function createRlmExtensionFactory(options: {
 			pi.appendEntry(RLM_PROMPT_MODE_TYPE, { mode });
 		};
 
+		pi.registerFlag("rlm-enabled", {
+			description: "Enable root RLM mode automatically on session start",
+			type: "boolean",
+			default: false,
+		});
+
+		const isRlmActive = () => !options.root || rlmModeEnabled;
+
+		const captureRetention = (messages: Parameters<typeof applyRetentionPolicy>[0], ctx: ExtensionContext): ReturnType<typeof applyRetentionPolicy> | undefined => {
+			if (!isRlmActive()) {
+				pendingRetentionEntry = undefined;
+				return undefined;
+			}
+			const workspace = findLatestWorkspace(ctx);
+			const workspaceSummary = buildWorkspaceWorkingSetSummary(workspace);
+			const result = applyRetentionPolicy(messages, {
+				workspace,
+				policy: DEFAULT_RLM_RETENTION_POLICY,
+				currentTurnIndex: activeTurnIndex,
+			});
+			pendingRetentionEntry = {
+				version: 1,
+				turnIndex: activeTurnIndex,
+				policy: DEFAULT_RLM_RETENTION_POLICY,
+				metrics: result.metrics,
+				...(workspaceSummary ? { workspaceSummary } : {}),
+			};
+			return result;
+		};
+
+		const emitRetentionEntry = (turnIndex: number): RlmRetentionEntry | undefined => {
+			if (!pendingRetentionEntry || pendingRetentionEntry.turnIndex !== turnIndex || emittedRetentionTurnIndex === turnIndex) return undefined;
+			const entry = pendingRetentionEntry;
+			pi.appendEntry(RLM_RETENTION_TYPE, entry);
+			emittedRetentionTurnIndex = turnIndex;
+			pendingRetentionEntry = undefined;
+			return entry;
+		};
+
+		const getWorkspaceBase = (ctx: ExtensionContext) => pendingWorkspace ?? findLatestWorkspace(ctx);
+
+		const queueWorkspaceUpdate = (next: RlmWorkspace | undefined) => {
+			if (!next) return;
+			pendingWorkspace = next;
+		};
+
+		const flushWorkspaceUpdates = (ctx: ExtensionContext) => {
+			if (!pendingWorkspace) return;
+			const previousWorkspace = findLatestWorkspace(ctx);
+			persistWorkspaceEntry(pi, pendingWorkspace, previousWorkspace);
+			pendingWorkspace = undefined;
+		};
+
+		const syncRetentionWorkspace = (ctx: ExtensionContext, retention: RlmRetentionEntry | undefined) => {
+			if (!retention) return;
+			const base = getWorkspaceBase(ctx);
+			if (!base) return;
+			const nextWorkspace = recordRetentionMetrics(base, retention.metrics, retention.turnIndex, retention.policy);
+			queueWorkspaceUpdate(nextWorkspace);
+		};
+
+		const recordLease = (
+			ctx: ExtensionContext,
+			input: {
+				source: "assistant" | "tool";
+				sourceName?: string;
+				turnIndex: number;
+				messageFingerprint: string;
+				expiresAfterTurns?: number;
+			},
+		) => {
+			const base = getWorkspaceBase(ctx);
+			if (!base) return;
+			const nextWorkspace = recordRetentionLease(base, input);
+			queueWorkspaceUpdate(nextWorkspace);
+		};
+
 		const refreshState = async (ctx: ExtensionContext) => {
 			const runtime = await restoreRuntime(manager, initializedKeys, ctx);
 			if (options.root) {
-				rlmModeEnabled = findRlmModeEnabled(ctx);
+				const flagEnabled = pi.getFlag("rlm-enabled") === true;
+				const persistedEnabled = findRlmModeEnabled(ctx);
+				if (flagEnabled && !persistedEnabled) {
+					persistMode(true);
+				}
+				rlmModeEnabled = flagEnabled || persistedEnabled;
 				rlmPromptMode = findRlmPromptMode(ctx);
 			}
 			const stats = computeStats(ctx, options, runtime.getSnapshot());
@@ -299,10 +421,70 @@ export function createRlmExtensionFactory(options: {
 		pi.on("session_before_switch", restoreHandler);
 		pi.on("session_tree", restoreHandler);
 		pi.on("session_before_fork", restoreHandler);
+		pi.on("session_before_compact", async (event, ctx) => {
+			if (!isRlmActive()) return;
+			const workspace = findLatestWorkspace(ctx);
+			return {
+				compaction: {
+					summary: buildRetentionCompactionSummary(workspace, event.preparation),
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+					details: {
+						workspaceSummary: buildWorkspaceWorkingSetSummary(workspace),
+						activeContextRefCount: workspace?.activeContext?.currentArtifactRefs?.length ?? 0,
+						summarizedMessages: event.preparation.messagesToSummarize.length,
+						keptTurnPrefixMessages: event.preparation.turnPrefixMessages.length,
+					},
+				},
+			};
+		});
+		pi.on("session_compact", async (_event, ctx) => {
+			syncRetentionWorkspace(ctx, pendingRetentionEntry);
+			flushWorkspaceUpdates(ctx);
+			const runtime = await getRuntime(manager, initializedKeys, ctx);
+			const stats = computeStats(ctx, options, runtime.getSnapshot());
+			applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
+		});
 		pi.on("session_shutdown", async () => {
 			await manager.disposeAll();
 		});
-		pi.on("turn_end", async (_event, ctx) => {
+		pi.on("turn_start", async (event) => {
+			activeTurnIndex = event.turnIndex;
+		});
+		pi.on("context", async (event, ctx) => {
+			const result = captureRetention(event.messages, ctx);
+			if (!result) return { messages: event.messages };
+			return { messages: result.messages };
+		});
+		pi.on("tool_execution_end", async (event, ctx) => {
+			if (!isRlmActive()) return;
+			recordLease(ctx, {
+				source: "tool",
+				sourceName: event.toolName,
+				turnIndex: activeTurnIndex,
+				messageFingerprint: buildToolFingerprint({
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					isError: event.isError,
+				}),
+				expiresAfterTurns: DEFAULT_RLM_RETENTION_POLICY.expireConsolidatedAfterTurns,
+			});
+		});
+		pi.on("message_end", async (event, ctx) => {
+			if (!isRlmActive()) return;
+			if (event.message.role !== "assistant") return;
+			recordLease(ctx, {
+				source: "assistant",
+				sourceName: "assistant",
+				turnIndex: activeTurnIndex,
+				messageFingerprint: buildAssistantFingerprint(event.message),
+				expiresAfterTurns: DEFAULT_RLM_RETENTION_POLICY.expireConsolidatedAfterTurns,
+			});
+		});
+		pi.on("turn_end", async (event, ctx) => {
+			const retentionEntry = emitRetentionEntry(event.turnIndex);
+			syncRetentionWorkspace(ctx, retentionEntry);
+			flushWorkspaceUpdates(ctx);
 			const runtime = await getRuntime(manager, initializedKeys, ctx);
 			const stats = computeStats(ctx, options, runtime.getSnapshot());
 			applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
@@ -310,21 +492,11 @@ export function createRlmExtensionFactory(options: {
 
 		pi.on("before_agent_start", async (event, ctx) => {
 			const runtime = await restoreRuntime(manager, initializedKeys, ctx);
-			const inspection = await runtime.inspect();
-			const active = !options.root || rlmModeEnabled;
 			const stats = computeStats(ctx, options, runtime.getSnapshot());
 			applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
-			if (!active) return;
+			if (!isRlmActive()) return;
 			return {
 				systemPrompt: `${event.systemPrompt}${buildRlmModeAppendix(rlmPromptMode)}`,
-				message:
-					inspection.entries.length > 0
-						? {
-								customType: "rlm-context",
-								content: `[RLM MODE ACTIVE]\n${formatStats(stats)}\n\n${inspection.table}`,
-								display: false,
-							}
-						: undefined,
 			};
 		});
 
@@ -334,11 +506,11 @@ export function createRlmExtensionFactory(options: {
 			description:
 				"Execute JavaScript in a persistent runtime with live variables. Persist state by assigning to globalThis.<name>.",
 			promptSnippet:
-				"Use this as the persistent coordinator workspace for multi-file or multi-step tasks. Keep durable state in globalThis.workspace. Helpers: final(), inspectGlobals(), llmQuery({ prompt, ... }).",
+				"Use this as the persistent coordinator workspace for multi-file or multi-step tasks. Keep durable state in globalThis.workspace and globalThis.workspace.activeContext. Helpers: final(), inspectGlobals(), llmQuery({ prompt, ... }).",
 			promptGuidelines: [
 				"For multi-file or multi-step tasks, use this as the top-level coordinator workspace.",
-				"Use globalThis.workspace as the main notebook for durable state; keep short-lived scratch values elsewhere only when useful.",
-				"Track goal, plan, files, findings, openQuestions, partialOutputs, and childArtifacts in globalThis.workspace when helpful.",
+				"Use globalThis.workspace as the main notebook for durable state and globalThis.workspace.activeContext as the current working set; keep short-lived scratch values elsewhere only when useful.",
+				"Track goal, plan, files, findings, openQuestions, partialOutputs, childArtifacts, and activeContext in globalThis.workspace when helpful.",
 				"Treat prompt metadata as an index to runtime state, not as a replacement for runtime state.",
 				"Child llmQuery artifacts are recorded under globalThis.workspace.childArtifacts; review and reuse them before repeating child analysis.",
 				"After child work, consolidate the important parts into workspace.findings or workspace.partialOutputs.",
@@ -432,9 +604,10 @@ export function createRlmExtensionFactory(options: {
 				stats.execCount += 1;
 				applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
 
+				const surface = buildExecSurfaceResult(result);
 				return {
-					content: [{ type: "text", text: formatExecResult(result) }],
-					details,
+					content: [{ type: "text", text: buildSurfaceText(surface) }],
+					details: { ...details, surface },
 				};
 			},
 		});
@@ -449,11 +622,13 @@ export function createRlmExtensionFactory(options: {
 				const inspection = await runtime.inspect();
 				const stats = computeStats(ctx, options, runtime.getSnapshot());
 				applyStatus(ctx, rlmModeEnabled, rlmPromptMode, options.root, stats);
+				const surface = buildInspectionSurfaceResult(inspection);
 				return {
-					content: [{ type: "text", text: formatInspection(inspection) }],
+					content: [{ type: "text", text: buildSurfaceText(surface) }],
 					details: {
 						snapshot: runtime.getSnapshot(),
 						inspection,
+						surface,
 					},
 				};
 			},

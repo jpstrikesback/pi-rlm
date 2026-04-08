@@ -4,8 +4,11 @@ import {
 	attachInternalLlmQueryContext,
 	buildStateManifest,
 	buildWorkspaceManifest,
+	buildWorkspaceWorkingSetSummary,
 	ensureWorkspaceShape,
 	recordArtifact,
+	recordRetentionLease,
+	recordRetentionMetrics,
 	selectRelevantArtifacts,
 	splitInternalLlmQueryContext,
 } from "../src/workspace.js";
@@ -36,13 +39,17 @@ function makeArtifact(overrides: Partial<RlmChildArtifact> = {}): RlmChildArtifa
 
 describe("workspace helpers", () => {
 	it("normalizes an arbitrary workspace object into the shared shape", () => {
-		const workspace = ensureWorkspaceShape({ goal: "refactor" });
+		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"] });
 
 		expect(workspace.goal).toBe("refactor");
 		expect(workspace.childArtifacts).toEqual([]);
 		expect(workspace.childArtifactSummaries).toEqual([]);
 		expect(workspace.artifactIndex?.recentIds).toEqual([]);
+		expect(workspace.activeContext?.goal).toBe("refactor");
+		expect(workspace.activeContext?.relevantFiles).toEqual(["src/a.ts"]);
+		expect(buildWorkspaceWorkingSetSummary(workspace)).toContain("Goal: refactor");
 		expect(workspace.meta?.version).toBe(1);
+		expect(workspace.meta?.activePlanRef).toBeUndefined();
 	});
 
 	it("records artifacts and rebuilds artifact indexes", () => {
@@ -54,8 +61,57 @@ describe("workspace helpers", () => {
 		expect(workspace.lastChildArtifact?.id).toBe("child-2");
 		expect(workspace.childArtifactSummaries?.map((item) => item.id)).toEqual(["child-1", "child-2"]);
 		expect(workspace.artifactIndex?.recentIds).toEqual(["child-1", "child-2"]);
+		expect(workspace.activeContext?.currentArtifactRefs).toEqual(["child-1", "child-2"]);
+		expect(workspace.meta?.activeArtifactRefs).toEqual(["child-1", "child-2"]);
 		expect(workspace.artifactIndex?.byTag?.auth).toEqual(["child-1"]);
 		expect(workspace.artifactIndex?.byFile?.["src/router.ts"]).toEqual(["child-2"]);
+	});
+
+	it("records retention metrics on the durable workspace", () => {
+		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"] });
+		const retention = {
+			version: 1,
+			keptMessages: 4,
+			prunedMessages: 2,
+			placeholderMessages: 1,
+			retainedTurns: 2,
+			prunedTurns: 1,
+			activeContextSummary: "Goal: refactor",
+		} as const;
+		const withLease = recordRetentionLease(workspace, {
+			source: "assistant",
+			sourceName: "assistant",
+			turnIndex: 2,
+			messageFingerprint: "assistant:2:preview",
+			expiresAfterTurns: 2,
+		});
+		const next = recordRetentionMetrics(withLease, retention, 3, {
+			expireConsolidatedAfterTurns: 2,
+			keepLatestSurfaceSummary: true,
+		});
+		const nextAgain = recordRetentionMetrics(next, retention, 3, {
+			expireConsolidatedAfterTurns: 2,
+			keepLatestSurfaceSummary: true,
+		});
+
+		expect(next?.retention?.latestTurnIndex).toBe(3);
+		expect(next?.retention?.latestMetrics?.keptMessages).toBe(4);
+		expect(next?.retention?.latestSurfaceSummary).toBe("Goal: refactor");
+		expect(next?.retention?.leases).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					status: "consolidated",
+					sourceName: "assistant",
+				}),
+				expect.objectContaining({
+					status: "consolidated",
+					sourceName: "rlm-retention",
+					consolidatedTo: [expect.objectContaining({ ref: "globalThis.workspace.activeContext" })],
+				}),
+			]),
+		);
+		expect(nextAgain?.retention?.leases?.length).toBeGreaterThanOrEqual(2);
+		expect(next?.activeContext?.goal).toBe("refactor");
 	});
 
 	it("builds manifests for parent state and workspace metadata", () => {

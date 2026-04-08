@@ -151,6 +151,10 @@ function createWorkerSource() {
 			for (const [key, value] of Object.entries(input?.bindings || {})) {
 				runtimeBindings[key] = value;
 			}
+			const workspace = runtimeBindings.workspace;
+			if (workspace && typeof workspace === "object" && !Array.isArray(workspace)) {
+				refreshWorkspaceProjection(workspace as Record<string, unknown>);
+			}
 			return { inspection: inspect(), snapshot: snapshot() };
 		};
 
@@ -192,12 +196,97 @@ function createWorkerSource() {
 			if (!Array.isArray(workspace.artifactIndex.recentIds)) workspace.artifactIndex.recentIds = [];
 			if (!workspace.meta || typeof workspace.meta !== "object" || Array.isArray(workspace.meta)) workspace.meta = { version: 1 };
 			workspace.meta.version = 1;
+			refreshWorkspaceProjection(workspace);
 			sandbox.workspace = workspace;
 			return workspace;
 		};
 
 		const normalizeStringList = (value: unknown) =>
 			Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : undefined;
+
+		const extractReferenceList = (value: unknown) => {
+			if (!Array.isArray(value)) return [] as string[];
+			const refs: string[] = [];
+			for (const item of value) {
+				if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+				const record = item as Record<string, unknown>;
+				for (const candidate of [record.ref, record.path, record.id]) {
+					if (typeof candidate === "string" && candidate.trim().length > 0) refs.push(candidate);
+				}
+			}
+			return Array.from(new Set(refs));
+		};
+
+		const buildWorkspaceActiveContext = (workspace: Record<string, unknown>) => {
+			const goal = typeof workspace.goal === "string" && workspace.goal.trim().length > 0 ? workspace.goal.trim() : undefined;
+			const currentPlan = normalizeStringList(workspace.plan)?.slice(0, 8);
+			const relevantFiles = normalizeStringList(workspace.files)?.slice(0, 8);
+			const currentQuestions = normalizeStringList(workspace.openQuestions)?.slice(0, 6);
+			const artifactIndex =
+				workspace.artifactIndex && typeof workspace.artifactIndex === "object" && !Array.isArray(workspace.artifactIndex)
+					? (workspace.artifactIndex as Record<string, unknown>)
+					: undefined;
+			const recentArtifactIds = Array.isArray(artifactIndex?.recentIds)
+				? artifactIndex.recentIds.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+				: [];
+			const currentArtifactRefs = Array.from(
+				new Set([
+					...(Array.isArray(workspace.childArtifacts)
+						? workspace.childArtifacts.flatMap((artifact) => {
+							if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return [] as string[];
+							const record = artifact as Record<string, unknown>;
+							return [record.id, record.childId].filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
+						})
+						: []),
+					...recentArtifactIds,
+				]),
+			).slice(-6);
+			const currentFindingsRefs = Array.from(
+				new Set([
+					...extractReferenceList(workspace.findings),
+					...(workspace.partialOutputs && typeof workspace.partialOutputs === "object" && !Array.isArray(workspace.partialOutputs)
+						? Object.keys(workspace.partialOutputs).filter((key) => key.trim().length > 0)
+						: []),
+				]),
+			);
+			const summaryParts: string[] = [];
+			if (goal) summaryParts.push(`Goal: ${goal}`);
+			if (currentPlan?.length) summaryParts.push(`Plan: ${currentPlan.slice(0, 3).join(" · ")}`);
+			if (relevantFiles?.length) summaryParts.push(`Files: ${relevantFiles.slice(0, 4).join(", ")}`);
+			if (currentQuestions?.length) summaryParts.push(`Questions: ${currentQuestions.slice(0, 3).join(" · ")}`);
+			if (currentArtifactRefs.length) summaryParts.push(`Artifacts: ${currentArtifactRefs.slice(-4).join(", ")}`);
+			const summary = summaryParts.length > 0 ? summaryParts.join("\n") : undefined;
+			const meta = workspace.meta && typeof workspace.meta === "object" && !Array.isArray(workspace.meta) ? (workspace.meta as Record<string, unknown>) : undefined;
+			const lastChildArtifact = workspace.lastChildArtifact && typeof workspace.lastChildArtifact === "object" && !Array.isArray(workspace.lastChildArtifact)
+				? (workspace.lastChildArtifact as Record<string, unknown>)
+				: undefined;
+			const updatedAt = typeof meta?.updatedAt === "string" ? meta.updatedAt : typeof lastChildArtifact?.producedAt === "string" ? lastChildArtifact.producedAt : undefined;
+			return {
+				...(goal ? { goal } : {}),
+				...(currentPlan ? { currentPlan } : {}),
+				...(relevantFiles ? { relevantFiles } : {}),
+				...(currentQuestions ? { currentQuestions } : {}),
+				...(currentFindingsRefs.length > 0 ? { currentFindingsRefs } : {}),
+				...(currentArtifactRefs.length > 0 ? { currentArtifactRefs } : {}),
+				...(summary ? { summary } : {}),
+				...(updatedAt ? { updatedAt } : {}),
+			};
+		};
+
+		const refreshWorkspaceProjection = (workspace: Record<string, unknown>) => {
+			const activeContext = buildWorkspaceActiveContext(workspace);
+			workspace.activeContext = activeContext;
+			const meta = {
+				version: 1,
+				...(workspace.meta && typeof workspace.meta === "object" && !Array.isArray(workspace.meta) ? workspace.meta : {}),
+			} as Record<string, unknown>;
+			if (activeContext.currentPlan) meta.activePlanRef = "globalThis.workspace.activeContext.currentPlan";
+			else delete meta.activePlanRef;
+			if (Array.isArray(activeContext.currentArtifactRefs) && activeContext.currentArtifactRefs.length > 0) meta.activeArtifactRefs = [...activeContext.currentArtifactRefs];
+			else delete meta.activeArtifactRefs;
+			workspace.meta = meta;
+			return workspace;
+		};
 
 		const rebuildArtifactIndex = (artifacts: Array<Record<string, unknown>>) => {
 			const byId = Object.create(null);
@@ -276,6 +365,7 @@ function createWorkerSource() {
 				version: 1,
 				...(typeof clonedArtifact.producedAt === "string" ? { updatedAt: clonedArtifact.producedAt } : {}),
 			};
+			refreshWorkspaceProjection(workspace);
 		};
 
 		const createSandbox = (consoleProxy: ReturnType<typeof createConsoleProxy>, finalState: { value: unknown }) => {
@@ -301,6 +391,9 @@ function createWorkerSource() {
 		};
 
 		const persistSandbox = (sandbox: Record<string, unknown>) => {
+			if (sandbox.workspace && typeof sandbox.workspace === "object" && !Array.isArray(sandbox.workspace)) {
+				refreshWorkspaceProjection(sandbox.workspace as Record<string, unknown>);
+			}
 			for (const key of Object.keys(runtimeBindings)) delete runtimeBindings[key];
 			for (const key of Object.keys(sandbox)) {
 				if (RESERVED_KEYS.has(key)) continue;

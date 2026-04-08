@@ -4,7 +4,7 @@ Pi-native evaluation harness for this repo.
 
 ## Purpose
 
-Use the same benchmark workflow for every meaningful change to `pi-turtle-rlm`, not just the current cache work.
+Benchmark every meaningful change to `pi-turtle-rlm`.
 
 The harness is built to compare:
 
@@ -20,8 +20,6 @@ while keeping the rest stable:
 
 ## Pi-native observation
 
-The harness now defaults to a Pi-native observation path.
-
 That means:
 
 - Pi resolves the real model/provider/auth setup
@@ -29,11 +27,9 @@ That means:
 - telemetry is captured from inside Pi via `pi-spy`
 - baseline vs candidate still compares built extension artifacts
 
-`pi-spy` lives at:
+`pi-spy` is passed explicitly to the eval command via `--spy-entrypoint`.
 
-- `~/Code/personal/pi-spy`
-
-and records provider payload, tool activity, message usage, and turn outcomes while Pi does the actual work.
+It records provider payload, tool activity, message usage, and turn outcomes, etc while Pi does the actual work.
 
 ## Provider profiles
 
@@ -67,6 +63,7 @@ The harness normalizes provider usage into the same output fields:
 ### Cache field mapping by profile
 
 #### `mlx`
+
 Uses OpenAI-compatible chat/completions usage fields returned by `mlx_lm.server`:
 
 - `promptTokens <- usage.prompt_tokens`
@@ -76,6 +73,7 @@ Uses OpenAI-compatible chat/completions usage fields returned by `mlx_lm.server`
 - `cacheMissTokens <- usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens`
 
 #### `openai-chat`
+
 Uses OpenAI-style chat/completions usage fields:
 
 - `promptTokens <- usage.prompt_tokens`
@@ -85,6 +83,7 @@ Uses OpenAI-style chat/completions usage fields:
 - `cacheMissTokens <- usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens`
 
 #### `openai-responses`
+
 Uses Responses API usage fields:
 
 - `promptTokens <- usage.input_tokens`
@@ -118,6 +117,7 @@ Using your normal Pi model/auth setup:
 npm run build
 npm run eval -- \
   --subject ./dist/index.js \
+  --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario extension-research \
   --model-id gpt-5.4 \
   --auth-provider openai-codex
@@ -128,6 +128,7 @@ If model ids exist under multiple providers, pin the provider explicitly:
 ```bash
 npm run eval -- \
   --subject ./dist/index.js \
+  --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario extension-research \
   --model-id gpt-5.4 \
   --model-provider openai-codex
@@ -149,6 +150,7 @@ npm run build
 npm run eval:compare -- \
   --baseline ./eval/artifacts/main/dist/index.js \
   --candidate ./dist/index.js \
+  --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario rlm-refactor-review \
   --model-id gpt-5.4 \
   --auth-provider openai-codex
@@ -169,6 +171,8 @@ Important nuance:
 
 Options:
 
+- pass the `pi-spy` extension entrypoint explicitly with:
+  - `--spy-entrypoint /path/to/pi-spy/src/index.ts`
 - override the Pi agent dir with:
   - `--agent-dir /path/to/agent`
 - override the auth provider name looked up in shared Pi auth with:

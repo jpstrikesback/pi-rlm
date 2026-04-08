@@ -99,13 +99,43 @@ describe("restore helpers", () => {
 				goal: "a",
 				childArtifacts: [],
 				childArtifactSummaries: [],
+				activeContext: expect.objectContaining({ goal: "a" }),
 				meta: { version: 1 },
 			}),
 		);
 	});
 
 	it("finds the latest persisted workspace entry", () => {
-		const workspace = { goal: "refactor", plan: ["a", "b"] };
+		const workspace = {
+			goal: "refactor",
+			plan: ["a", "b"],
+			retention: {
+				latestTurnIndex: 3,
+				latestSurfaceSummary: "Goal: refactor",
+				latestMetrics: {
+					version: 1,
+					keptMessages: 5,
+					prunedMessages: 2,
+					placeholderMessages: 1,
+					retainedTurns: 2,
+					prunedTurns: 1,
+				},
+				leases: [
+					{
+						id: "retention-3-5-2",
+						source: "assistant",
+						sourceName: "rlm-retention",
+						turnIndex: 3,
+						messageFingerprint: "5:2:1:2:1",
+						status: "consolidated",
+						consolidatedTo: [{ kind: "workspace-path", ref: "globalThis.workspace.activeContext", summary: "Goal: refactor" }],
+						expiresAfterTurns: 2,
+						createdAt: "2026-04-04T00:00:00.000Z",
+						updatedAt: "2026-04-04T00:00:00.000Z",
+					},
+				],
+			},
+		};
 		const ctx = makeCtx("session-1", [
 			{
 				type: "custom",
@@ -124,7 +154,25 @@ describe("restore helpers", () => {
 				...workspace,
 				childArtifacts: [],
 				childArtifactSummaries: [],
-				meta: { version: 1 },
+				activeContext: expect.objectContaining({ goal: "refactor", currentPlan: ["a", "b"] }),
+				retention: expect.objectContaining({
+					latestTurnIndex: 3,
+					latestSurfaceSummary: "Goal: refactor",
+					latestMetrics: expect.objectContaining({
+						keptMessages: 5,
+						prunedTurns: 1,
+					}),
+					leases: expect.arrayContaining([
+						expect.objectContaining({
+							status: "consolidated",
+							sourceName: "rlm-retention",
+						}),
+					]),
+				}),
+				meta: expect.objectContaining({
+					version: 1,
+					activePlanRef: "globalThis.workspace.activeContext.currentPlan",
+				}),
 			}),
 		);
 	});

@@ -38,6 +38,138 @@ function prelude(title: string): string {
 	].join("\n");
 }
 
+function buildLongHorizonContextTurns() {
+	const title = "Audit whether this RLM extension achieves thin live context over a long, multi-turn workflow.";
+	const steps = [
+		{
+			id: "map-root-child-finalize",
+			title: "Map root, child, and finalize prompt paths",
+			request:
+				"Inspect the code paths for root prompts, child prompts, finalization prompts, and runtime restoration. Save concrete findings in runtime for reuse.",
+		},
+		{
+			id: "map-tool-surfaces",
+			title: "Map model-visible tool surfaces",
+			request:
+				"Using the findings already stored, identify which tool outputs are model-visible versus hidden in details/UI. Add exact file paths and the highest-risk surfaces.",
+		},
+		{
+			id: "map-retention-hooks",
+			title: "Map retention hooks and policies",
+			request:
+				"Trace the retention pipeline across context hooks, retention entries, leases, and compaction hooks. Reuse prior notes instead of starting over.",
+		},
+		{
+			id: "map-active-context",
+			title: "Map activeContext and workspace projection",
+			request:
+				"Explain how workspace.activeContext is derived, refreshed, and used in prompts. Focus on what should replace transcript memory.",
+		},
+		{
+			id: "audit-pointer-prompts",
+			title: "Audit pointer-based prompt design",
+			request:
+				"Review child/finalize prompt construction and judge how pointer-based it really is. Note where prose summaries still leak back into prompt context.",
+		},
+		{
+			id: "audit-compaction-bridge",
+			title: "Audit compaction bridge",
+			request:
+				"Inspect how compaction summaries and retention state interact. Summarize whether compaction is reinforcing external memory or merely summarizing a still-growing transcript.",
+		},
+		{
+			id: "find-context-bloat-causes",
+			title: "Identify likely context bloat causes",
+			request:
+				"From the stored findings, list the top concrete reasons context can still balloon across turns. Rank them by likely impact.",
+		},
+		{
+			id: "propose-aggressive-policy",
+			title: "Propose a much harsher retention policy",
+			request:
+				"Design a stricter retention policy that aims for a lean working set. Keep it grounded in the existing code rather than inventing a new architecture.",
+		},
+		{
+			id: "stress-unresolved-flows",
+			title: "Stress unresolved tool-flow handling",
+			request:
+				"Analyze whether unresolved tool flows really survive while ordinary assistant/tool chatter expires. Reuse the previous policy analysis.",
+		},
+		{
+			id: "stress-lease-model",
+			title: "Stress-test the lease model",
+			request:
+				"Evaluate whether leases are doing true consolidation-aware expiration or just bookkeeping. Be explicit about what is missing.",
+		},
+		{
+			id: "compare-transcript-vs-workspace",
+			title: "Compare transcript memory versus workspace memory",
+			request:
+				"Answer whether durable knowledge is mostly living in the workspace yet, or whether the transcript still carries too much of the semantic load.",
+		},
+		{
+			id: "revisit-earlier-findings",
+			title: "Revisit earlier findings without re-discovery",
+			request:
+				"Using only the runtime/workspace notes you already stored unless validation is necessary, restate the strongest evidence for and against real context thinning.",
+		},
+		{
+			id: "narrow-critical-files",
+			title: "Narrow to the critical files",
+			request:
+				"Reduce the problem to the smallest set of source files that actually control long-horizon context shape. Keep the list tight and justified.",
+		},
+		{
+			id: "define-next-implementation-slice",
+			title: "Define the next implementation slice",
+			request:
+				"Propose the smallest implementation slice that would most likely shrink live context in a measurable way over many turns.",
+		},
+		{
+			id: "define-telemetry-checks",
+			title: "Define telemetry checks",
+			request:
+				"Define the exact telemetry checks needed to prove the working set plateaus instead of growing. Reuse existing eval/pi-spy knowledge.",
+		},
+		{
+			id: "define-pass-fail-criteria",
+			title: "Define pass/fail criteria",
+			request:
+				"Write concrete pass/fail criteria for a real RLM context-management win in this repo, not just a cache win.",
+		},
+		{
+			id: "challenge-own-plan",
+			title: "Challenge the proposed direction",
+			request:
+				"Argue against your own proposed next slice. Identify where it could fail to reduce context growth in practice.",
+		},
+		{
+			id: "revise-plan-after-critique",
+			title: "Revise the plan after critique",
+			request:
+				"Revise the next slice after the critique, keeping only the parts most likely to produce thinner live context.",
+		},
+		{
+			id: "final-consolidation",
+			title: "Consolidate the long-horizon audit",
+			request:
+				"Consolidate the most reusable findings, active refs, and recommended next actions into runtime/workspace so they can replace transcript memory.",
+		},
+		{
+			id: "final-verdict",
+			title: "Give the final verdict",
+			request:
+				"Give a final verdict on whether this implementation currently behaves like real RLM context thinning. Keep it evidence-based and grounded in the prior stored notes.",
+		},
+	] as const;
+
+	return steps.map((step) => ({
+		id: step.id,
+		title: step.title,
+		prompt: `${prelude(title)}\n${step.request}`,
+	}));
+}
+
 export function getEvalScenarios(): EvalScenario[] {
 	return [
 		{
@@ -103,6 +235,7 @@ export function getEvalScenarios(): EvalScenario[] {
 				"This RLM extension source",
 				"Pi docs/examples for prompt injection and SDK behavior",
 			],
+			extensionFlags: { "rlm-enabled": true },
 			turns: [
 				{
 					id: "inspect-current-behavior",
@@ -120,6 +253,19 @@ export function getEvalScenarios(): EvalScenario[] {
 					prompt: `${prelude("Review the risks and evaluation needs for that refactor.")}\nUsing the prior runtime notes, explain the main risks to root RLM behavior, child recursion quality, and evaluation design. Keep it practical and tied to this repo.`,
 				},
 			],
+		},
+		{
+			id: "rlm-context-long-horizon",
+			label: "RLM context long horizon",
+			description: "Twenty-turn long-horizon audit meant to reveal whether live context plateaus or keeps growing.",
+			cwd: repoRoot,
+			corpusSummary: [
+				"This RLM extension source",
+				"Pi docs/examples for extension lifecycle, context, and compaction",
+				"Repeated multi-turn reuse of runtime/workspace findings",
+			],
+			extensionFlags: { "rlm-enabled": true },
+			turns: buildLongHorizonContextTurns(),
 		},
 	];
 }

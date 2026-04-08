@@ -117,6 +117,9 @@ describe("RuntimeSession", () => {
 
 		expect(result.ok).toBe(true);
 		expect(result.finalValue).toBe(42);
+		const runtimeWorkspace = runtime.getSnapshot().bindings.workspace as any;
+		expect(runtimeWorkspace.activeContext.goal).toBe("refactor");
+		expect(runtimeWorkspace.activeContext.relevantFiles).toEqual(["src/auth.ts"]);
 		const inspection = await runtime.inspect();
 		expect(inspection.table).toContain("child");
 	});
@@ -170,6 +173,7 @@ describe("RuntimeSession", () => {
 		expect(inspection.table).toContain("workspace");
 		const workspace = runtime.getSnapshot().bindings.workspace as any;
 		expect(workspace.artifactIndex.recentIds).toEqual(["child-1"]);
+		expect(workspace.activeContext.currentArtifactRefs).toEqual(["child-1"]);
 		expect(workspace.childArtifactSummaries[0].id).toBe("child-1");
 	});
 

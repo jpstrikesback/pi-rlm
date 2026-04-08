@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import {
+	AgentSession,
 	AuthStorage,
 	createAgentSession,
 	DefaultResourceLoader,
@@ -16,6 +17,7 @@ import { findProviderProfile, getProviderProfiles } from "./eval/provider-profil
 import { findScenario, getEvalScenarios, getPinnedPiVersion, getRepoRoot } from "./eval/scenarios.js";
 import type {
 	EvalCompareResult,
+	EvalContextStats,
 	EvalRunResult,
 	EvalScenario,
 	EvalToolEvent,
@@ -24,12 +26,11 @@ import type {
 	ProxyUsage,
 } from "./eval/types.js";
 
-const PI_SPY_ENTRYPOINT = path.resolve(os.homedir(), "Code/personal/pi-spy/src/index.ts");
-
 type CliArgs = Record<string, string | boolean>;
 
 type NativeRunOptions = {
 	subjectEntrypoint: string;
+	spyEntrypoint: string;
 	subjectLabel: string;
 	scenario: EvalScenario;
 	modelId: string;
@@ -48,6 +49,11 @@ type SpyEvent = {
 	sessionId?: string;
 	turnIndex?: number;
 	data?: unknown;
+};
+
+type SpyContextSample = {
+	messageCount?: number;
+	estimatedChars?: number;
 };
 
 async function main() {
@@ -83,6 +89,7 @@ async function runCommand(args: CliArgs) {
 	for (const scenario of scenarios) {
 		const result = await runNativeScenario({
 			subjectEntrypoint: subject,
+			spyEntrypoint: requireArg(args, "spyEntrypoint"),
 			subjectLabel: label,
 			scenario,
 			modelId,
@@ -108,6 +115,7 @@ async function compareCommand(args: CliArgs) {
 
 	for (const scenario of scenarios) {
 		const shared = {
+			spyEntrypoint: requireArg(args, "spyEntrypoint"),
 			scenario,
 			modelId,
 			providerProfile,
@@ -177,7 +185,8 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 
 	const effectiveAuthAgentDir = options.isolatedAuth ? sessionAgentDir : options.authAgentDir;
 	await mkdir(effectiveAuthAgentDir, { recursive: true });
-	const authStorage = AuthStorage.create(path.join(effectiveAuthAgentDir, "auth.json"));
+	const fileAuthStorage = AuthStorage.create(path.join(effectiveAuthAgentDir, "auth.json"));
+	const authStorage = AuthStorage.inMemory(fileAuthStorage.getAll());
 	const modelRegistry = ModelRegistry.create(authStorage, path.join(effectiveAuthAgentDir, "models.json"));
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
 
@@ -187,6 +196,12 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			`Could not resolve model ${options.modelId}. Try --model-provider <provider>. Available matching providers: ${findMatchingProviders(modelRegistry, options.modelId).join(", ") || "(none)"}`,
 		);
 	}
+	if (options.authProviderOverride && options.authProviderOverride !== selectedModel.provider) {
+		const overrideCredential = authStorage.get(options.authProviderOverride);
+		if (overrideCredential) {
+			authStorage.set(selectedModel.provider, overrideCredential);
+		}
+	}
 	if (options.reasoning && selectedModel.reasoning === false) {
 		// keep going, but make it visible in logs later via selected model metadata
 	}
@@ -195,7 +210,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 	}
 
 	const resolvedSubjectEntrypoint = path.resolve(subjectEntrypoint);
-	const resolvedSpyEntrypoint = path.resolve(PI_SPY_ENTRYPOINT);
+	const resolvedSpyEntrypoint = path.resolve(options.spyEntrypoint);
 	const resourceLoader = new DefaultResourceLoader({
 		cwd: options.scenario.cwd,
 		agentDir: sessionAgentDir,
@@ -215,10 +230,11 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 	process.env.PI_SPY_AUTO = "true";
 	process.env.PI_SPY_LOG = spyLogPath;
 
+	let session: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	try {
 		await resourceLoader.reload();
-		const { session } = await createAgentSession({
+		const created = await createAgentSession({
 			cwd: options.scenario.cwd,
 			model: selectedModel,
 			authStorage,
@@ -227,6 +243,10 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			settingsManager,
 			sessionManager: SessionManager.inMemory(options.scenario.cwd),
 		});
+		session = created.session;
+		for (const [flagName, flagValue] of Object.entries(options.scenario.extensionFlags ?? {})) {
+			session.extensionRunner?.setFlagValue(flagName, flagValue);
+		}
 		await session.bindExtensions({});
 
 		const turns: EvalTurnResult[] = [];
@@ -276,6 +296,12 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 		let previousMessageCount = session.messages.length;
 		let spyCursor = 0;
 
+		for (const setupPrompt of options.scenario.setupPrompts ?? []) {
+			await session.prompt(setupPrompt);
+			previousMessageCount = session.messages.length;
+			spyCursor = (await readSpyEvents(spyLogPath)).length;
+		}
+
 		for (let turnIndex = 0; turnIndex < options.scenario.turns.length; turnIndex += 1) {
 			const turn = options.scenario.turns[turnIndex];
 			currentTools = [];
@@ -296,6 +322,8 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			const newSpyEvents = allSpyEvents.slice(spyCursor);
 			spyCursor = allSpyEvents.length;
 			const requests = spyEventsToRequests(newSpyEvents, turnIndex, turn.id);
+			const contextSamples = spyEventsToContextSamples(newSpyEvents);
+			const contextStats = summarizeContextSamples(contextSamples);
 			const newMessages = session.messages.slice(previousMessageCount);
 			previousMessageCount = session.messages.length;
 			const assistantText = extractAssistantText(newMessages, currentAssistantDeltas);
@@ -325,6 +353,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 				childQueryCount: currentChildQueryCount,
 				childTurns: currentChildTurns,
 				firstRequestCanonical,
+				context: contextStats,
 				...(sharedPrefix !== undefined
 					? {
 						firstRequestSharedPrefixCharsVsPreviousTurn: sharedPrefix,
@@ -347,6 +376,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			totalRlmExecCount: turns.reduce((sum, turn) => sum + turn.rlmExecCount, 0),
 			totalChildQueryCount: turns.reduce((sum, turn) => sum + turn.childQueryCount, 0),
 			totalChildTurns: turns.reduce((sum, turn) => sum + turn.childTurns, 0),
+			context: summarizeContextAcrossTurns(turns),
 		};
 
 		return {
@@ -378,7 +408,13 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			summary,
 		};
 	} finally {
+		try {
+			await session?.extensionRunner?.emit({ type: "session_shutdown" });
+		} catch {
+			// ignore shutdown errors
+		}
 		unsubscribe?.();
+		session?.dispose();
 		if (previousSpyAuto === undefined) delete process.env.PI_SPY_AUTO;
 		else process.env.PI_SPY_AUTO = previousSpyAuto;
 		if (previousSpyLog === undefined) delete process.env.PI_SPY_LOG;
@@ -394,6 +430,13 @@ function resolveNativeModel(modelRegistry: ModelRegistry, options: NativeRunOpti
 	if (options.authProviderOverride) {
 		const exact = modelRegistry.find(options.authProviderOverride, options.modelId);
 		if (exact) return exact;
+		const authAliasExists = authStorage.has(options.authProviderOverride);
+		if (!authAliasExists) {
+			const available = findMatchingProviders(modelRegistry, options.modelId);
+			throw new Error(
+				`Auth provider override ${options.authProviderOverride} is neither a registered provider for model ${options.modelId} nor an available auth alias. Available matching providers: ${available.join(", ") || "(none)"}. Available auth aliases: ${authStorage.list().join(", ") || "(none)"}`,
+			);
+		}
 	}
 	for (const provider of options.providerProfile.authProviderCandidates ?? [options.providerProfile.providerName]) {
 		const exact = modelRegistry.find(provider, options.modelId);
@@ -457,6 +500,44 @@ function spyEventsToRequests(events: SpyEvent[], turnIndex: number, turnId: stri
 		});
 }
 
+function spyEventsToContextSamples(events: SpyEvent[]): SpyContextSample[] {
+	return events
+		.filter((event) => event.type === "context")
+		.map((event) => {
+			const data = isRecord(event.data) ? event.data : {};
+			return {
+				messageCount: optionalNumber(data.messageCount),
+				estimatedChars: optionalNumber(data.estimatedChars),
+			};
+		});
+}
+
+function summarizeContextSamples(samples: SpyContextSample[]): EvalContextStats | undefined {
+	if (samples.length === 0) return undefined;
+	const messageCounts = samples.map((sample) => sample.messageCount).filter(isFiniteNumber);
+	const estimatedChars = samples.map((sample) => sample.estimatedChars).filter(isFiniteNumber);
+	const last = samples[samples.length - 1];
+	return {
+		eventCount: samples.length,
+		lastMessageCount: last?.messageCount,
+		lastEstimatedChars: last?.estimatedChars,
+		maxMessageCount: messageCounts.length ? Math.max(...messageCounts) : undefined,
+		maxEstimatedChars: estimatedChars.length ? Math.max(...estimatedChars) : undefined,
+	};
+}
+
+function summarizeContextAcrossTurns(turns: EvalTurnResult[]): EvalRunResult["summary"]["context"] | undefined {
+	const contexts = turns.map((turn) => turn.context).filter((context): context is EvalContextStats => !!context);
+	if (contexts.length === 0) return undefined;
+	const last = contexts.at(-1);
+	return {
+		maxMessageCount: maxOf(contexts.map((context) => context.maxMessageCount)),
+		maxEstimatedChars: maxOf(contexts.map((context) => context.maxEstimatedChars)),
+		lastMessageCount: last?.lastMessageCount ?? last?.maxMessageCount,
+		lastEstimatedChars: last?.lastEstimatedChars ?? last?.maxEstimatedChars,
+	};
+}
+
 function usageFromAssistantMessage(message: unknown): ProxyUsage {
 	if (!isRecord(message) || !isRecord(message.usage)) return emptyUsage();
 	const usage = message.usage as Record<string, unknown>;
@@ -481,6 +562,19 @@ function emptyUsage(): ProxyUsage {
 
 function numberValue(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function optionalNumber(value: unknown): number | undefined {
+	return isFiniteNumber(value) ? value : undefined;
+}
+
+function maxOf(values: Array<number | undefined>): number | undefined {
+	const filtered = values.filter(isFiniteNumber);
+	return filtered.length ? Math.max(...filtered) : undefined;
 }
 
 function extractField(message: unknown, key: string): string | undefined {
@@ -592,15 +686,26 @@ function renderRunSummary(result: EvalRunResult, out: { baseDir: string; jsonPat
 		`- Tool calls: ${result.summary.totalToolCalls}`,
 		`- rlm_exec count: ${result.summary.totalRlmExecCount}`,
 		`- Child queries/turns: ${result.summary.totalChildQueryCount}/${result.summary.totalChildTurns}`,
+	];
+	if (result.summary.context) {
+		lines.push(
+			`- Context (max): messages ${formatMaybeNumber(result.summary.context.maxMessageCount)}, est chars ${formatMaybeNumber(result.summary.context.maxEstimatedChars)}`,
+			`- Context (last): messages ${formatMaybeNumber(result.summary.context.lastMessageCount)}, est chars ${formatMaybeNumber(result.summary.context.lastEstimatedChars)}`,
+		);
+	}
+	lines.push(
 		"",
 		"## Turns",
 		"",
-	];
+	);
 	for (const turn of result.turns) {
 		lines.push(`### ${turn.turnIndex + 1}. ${turn.title}`);
 		lines.push(`- Requests: ${turn.requestCount}`);
 		lines.push(`- Duration: ${formatMs(turn.durationMs)}`);
 		lines.push(`- Usage: prompt ${turn.usage.promptTokens}, completion ${turn.usage.completionTokens}, cache hit ${turn.usage.cacheHitTokens}, cache miss ${turn.usage.cacheMissTokens}`);
+		if (turn.context) {
+			lines.push(`- Context: ${formatContextStats(turn.context)}`);
+		}
 		if (turn.firstRequestCanonical) {
 			lines.push(`- First request canonical: ${turn.firstRequestCanonical.length} chars, hash ${shortHash(turn.firstRequestCanonical)}`);
 		}
@@ -652,6 +757,10 @@ function renderCompareSummary(result: EvalCompareResult, out: { baseDir: string;
 		"",
 		...renderPrefixEvidence(result),
 		"",
+		"## Context size evidence",
+		"",
+		...renderContextEvidence(result),
+		"",
 		"## Baseline summary",
 		"",
 		renderRunSummary(result.baseline, { baseDir: out.baseDir, jsonPath: out.jsonPath, mdPath: out.mdPath }),
@@ -679,6 +788,22 @@ function renderPrefixEvidence(result: EvalCompareResult): string[] {
 	return lines;
 }
 
+function renderContextEvidence(result: EvalCompareResult): string[] {
+	const lines: string[] = [];
+	const turnCount = Math.max(result.baseline.turns.length, result.candidate.turns.length);
+	for (let i = 0; i < turnCount; i += 1) {
+		const baselineTurn = result.baseline.turns[i];
+		const candidateTurn = result.candidate.turns[i];
+		if (!baselineTurn && !candidateTurn) continue;
+		lines.push(`### Turn ${i + 1}`);
+		if (baselineTurn) lines.push(`- Baseline: ${describeContextEvidence(baselineTurn)}`);
+		if (candidateTurn) lines.push(`- Candidate: ${describeContextEvidence(candidateTurn)}`);
+		lines.push("");
+	}
+	if (lines.length === 0) lines.push("- No turn data available.");
+	return lines;
+}
+
 function describePrefixEvidence(turn: EvalTurnResult): string {
 	if (!turn.firstRequestCanonical) {
 		return `no provider payload captured; usage prompt/cache=${turn.usage.promptTokens}/${turn.usage.cacheHitTokens}/${turn.usage.cacheMissTokens}`;
@@ -687,6 +812,19 @@ function describePrefixEvidence(turn: EvalTurnResult): string {
 		? "n/a vs previous"
 		: `${turn.firstRequestSharedPrefixCharsVsPreviousTurn} chars (${(100 * (turn.firstRequestSharedPrefixRatioVsPreviousTurn ?? 0)).toFixed(1)}%) vs previous`;
 	return `${turn.requestCount} request(s); first canonical ${turn.firstRequestCanonical.length} chars, hash ${shortHash(turn.firstRequestCanonical)}, shared prefix ${prefix}; usage prompt/cache=${turn.usage.promptTokens}/${turn.usage.cacheHitTokens}/${turn.usage.cacheMissTokens}`;
+}
+
+function describeContextEvidence(turn: EvalTurnResult): string {
+	if (!turn.context) return "no context telemetry";
+	const parts = [`events ${turn.context.eventCount}`];
+	if (turn.context.maxMessageCount !== undefined) parts.push(`max messages ${turn.context.maxMessageCount}`);
+	if (turn.context.maxEstimatedChars !== undefined) parts.push(`max chars ${turn.context.maxEstimatedChars}`);
+	if (turn.context.lastMessageCount !== undefined || turn.context.lastEstimatedChars !== undefined) {
+		parts.push(
+			`last messages ${formatMaybeNumber(turn.context.lastMessageCount)}, last chars ${formatMaybeNumber(turn.context.lastEstimatedChars)}`,
+		);
+	}
+	return parts.join("; ");
 }
 
 function parseArgs(args: string[]): CliArgs {
@@ -740,11 +878,12 @@ function printScenarios() {
 function printHelp() {
 	console.log(`Usage:
   npm run eval:list
-  npm run eval -- --subject ./dist/index.js --scenario rlm-refactor-review --model-id gpt-5.4 --auth-provider openai-codex
-  npm run eval:compare -- --baseline ./eval/artifacts/main/dist/index.js --candidate ./dist/index.js --scenario rlm-refactor-review --model-id gpt-5.4 --auth-provider openai-codex
+  npm run eval -- --subject ./dist/index.js --spy-entrypoint ../pi-spy/src/index.ts --scenario rlm-refactor-review --model-id gpt-5.4 --auth-provider openai-codex
+  npm run eval:compare -- --baseline ./eval/artifacts/main/dist/index.js --candidate ./dist/index.js --spy-entrypoint ../pi-spy/src/index.ts --scenario rlm-refactor-review --model-id gpt-5.4 --auth-provider openai-codex
   npm run eval:baseline -- --name main
 
 Native-mode options:
+  --spy-entrypoint   Path to the pi-spy extension entrypoint (required for run/compare)
   --model-id         Model id to resolve from your normal Pi setup (required)
   --model-provider   Exact provider to use for model resolution
   --auth-provider    Preferred provider/auth namespace (e.g. openai-codex)
@@ -777,6 +916,22 @@ function trimPreview(value: string, limit = 1200): string {
 	return trimmed.length > limit ? `${trimmed.slice(0, limit - 1)}…` : trimmed;
 }
 
+function formatContextStats(context: EvalContextStats): string {
+	const parts = [`events ${context.eventCount}`];
+	if (context.maxMessageCount !== undefined) parts.push(`max messages ${context.maxMessageCount}`);
+	if (context.maxEstimatedChars !== undefined) parts.push(`max chars ${context.maxEstimatedChars}`);
+	if (context.lastMessageCount !== undefined || context.lastEstimatedChars !== undefined) {
+		parts.push(
+			`last messages ${formatMaybeNumber(context.lastMessageCount)}, last chars ${formatMaybeNumber(context.lastEstimatedChars)}`,
+		);
+	}
+	return parts.join(" · ");
+}
+
+function formatMaybeNumber(value: number | undefined): string {
+	return typeof value === "number" && Number.isFinite(value) ? String(value) : "n/a";
+}
+
 function formatMs(value: number): string {
 	return `${Math.round(value)}ms`;
 }
@@ -785,7 +940,15 @@ function signed(value: number): string {
 	return value > 0 ? `+${value}` : String(value);
 }
 
-void main().catch((error) => {
-	console.error(error instanceof Error ? error.stack || error.message : String(error));
-	process.exitCode = 1;
-});
+function scheduleExit() {
+	setTimeout(() => process.exit(process.exitCode ?? 0), 0);
+}
+
+void main()
+	.catch((error) => {
+		console.error(error instanceof Error ? error.stack || error.message : String(error));
+		process.exitCode = 1;
+	})
+	.finally(() => {
+		scheduleExit();
+	});

@@ -1,11 +1,17 @@
 import type {
 	LlmQueryRole,
+	RlmActiveContext,
 	RlmArtifactIndex,
 	RlmArtifactSummary,
 	RlmChildArtifact,
+	RlmConsolidationRef,
+	RlmLease,
+	RlmRetentionMetrics,
+	RlmRetentionPolicy,
 	RlmValueManifest,
 	RlmWorkspace,
 	RlmWorkspaceManifest,
+	RlmWorkspaceMeta,
 } from "./types.js";
 
 export const INTERNAL_LLM_QUERY_CONTEXT_KEY = "__rlmRuntimeContext";
@@ -15,6 +21,7 @@ const DEFAULT_MANIFEST_SECTION_LIMIT = 6;
 const DEFAULT_KEY_PREVIEW_LIMIT = 8;
 const DEFAULT_ARRAY_PREVIEW_LIMIT = 3;
 const DEFAULT_ARTIFACT_PREVIEW_LIMIT = 4;
+const MAX_RETENTION_LEASES = 24;
 const WORKSPACE_RUNTIME_PATH = "globalThis.workspace" as const;
 const PARENT_STATE_RUNTIME_PATH = "globalThis.parentState" as const;
 const INPUT_RUNTIME_PATH = "globalThis.input" as const;
@@ -32,6 +39,87 @@ function normalizeStringList(value: unknown): string[] | undefined {
 function normalizeArtifactList(value: unknown): RlmChildArtifact[] {
 	if (!Array.isArray(value)) return [];
 	return value.filter((item): item is RlmChildArtifact => isRecord(item) && typeof item.childId === "string");
+}
+
+function normalizeStringArray(value: unknown, limit?: number): string[] | undefined {
+	const list = normalizeStringList(value);
+	if (!list) return undefined;
+	const next = typeof limit === "number" ? list.slice(0, limit) : list;
+	return next.length > 0 ? next : undefined;
+}
+
+function extractReferenceList(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const refs = value.flatMap((item) => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+		const record = item as Record<string, unknown>;
+		return [record.ref, record.path, record.id].filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
+	});
+	const unique = Array.from(new Set(refs));
+	return unique.length > 0 ? unique : undefined;
+}
+
+function buildDerivedActiveContext(workspace: RlmWorkspace): RlmActiveContext {
+	const goal = typeof workspace.goal === "string" && workspace.goal.trim().length > 0 ? workspace.goal.trim() : undefined;
+	const currentPlan = normalizeStringArray(workspace.plan, 8);
+	const relevantFiles = normalizeStringArray(workspace.files, 8);
+	const currentQuestions = normalizeStringArray(workspace.openQuestions, 6);
+	const currentArtifactRefs = normalizeStringArray(workspace.artifactIndex?.recentIds, 6);
+	const currentFindingsRefs = Array.from(
+		new Set([
+			...(extractReferenceList(workspace.findings) ?? []),
+			...(workspace.partialOutputs && isRecord(workspace.partialOutputs) ? Object.keys(workspace.partialOutputs) : []),
+		]),
+	);
+	const summaryParts: string[] = [];
+	if (goal) summaryParts.push(`Goal: ${goal}`);
+	if (currentPlan?.length) summaryParts.push(`Plan: ${currentPlan.slice(0, 3).join(" · ")}`);
+	if (relevantFiles?.length) summaryParts.push(`Files: ${relevantFiles.slice(0, 4).join(", ")}`);
+	if (currentQuestions?.length) summaryParts.push(`Questions: ${currentQuestions.slice(0, 3).join(" · ")}`);
+	if (currentArtifactRefs?.length) summaryParts.push(`Artifacts: ${currentArtifactRefs.slice(-4).join(", ")}`);
+	const summary = summaryParts.length > 0 ? summaryParts.join("\n") : undefined;
+	const updatedAt = typeof workspace.meta?.updatedAt === "string" ? workspace.meta.updatedAt : workspace.lastChildArtifact?.producedAt;
+	return {
+		...(goal ? { goal } : {}),
+		...(currentPlan ? { currentPlan } : {}),
+		...(relevantFiles ? { relevantFiles } : {}),
+		...(currentQuestions ? { currentQuestions } : {}),
+		...(currentFindingsRefs.length > 0 ? { currentFindingsRefs } : {}),
+		...(currentArtifactRefs ? { currentArtifactRefs } : {}),
+		...(summary ? { summary } : {}),
+		...(updatedAt ? { updatedAt } : {}),
+	};
+}
+
+function refreshWorkspaceProjection(workspace: RlmWorkspace): RlmWorkspace {
+	const derived = buildDerivedActiveContext(workspace);
+	const existing = isRecord(workspace.activeContext) ? (workspace.activeContext as RlmActiveContext) : {};
+	workspace.activeContext = {
+		...(derived.goal ? { goal: derived.goal } : {}),
+		...(existing.goal && !derived.goal ? { goal: existing.goal } : {}),
+		...(derived.currentPlan ? { currentPlan: derived.currentPlan } : {}),
+		...(existing.currentPlan && !derived.currentPlan ? { currentPlan: existing.currentPlan } : {}),
+		...(derived.relevantFiles ? { relevantFiles: derived.relevantFiles } : {}),
+		...(existing.relevantFiles && !derived.relevantFiles ? { relevantFiles: existing.relevantFiles } : {}),
+		...(derived.currentQuestions ? { currentQuestions: derived.currentQuestions } : {}),
+		...(existing.currentQuestions && !derived.currentQuestions ? { currentQuestions: existing.currentQuestions } : {}),
+		...(derived.currentFindingsRefs ? { currentFindingsRefs: derived.currentFindingsRefs } : {}),
+		...(existing.currentFindingsRefs && !derived.currentFindingsRefs ? { currentFindingsRefs: existing.currentFindingsRefs } : {}),
+		...(derived.currentArtifactRefs ? { currentArtifactRefs: derived.currentArtifactRefs } : {}),
+		...(existing.currentArtifactRefs && !derived.currentArtifactRefs ? { currentArtifactRefs: existing.currentArtifactRefs } : {}),
+		...(derived.summary ? { summary: derived.summary } : existing.summary ? { summary: existing.summary } : {}),
+		...(derived.updatedAt ? { updatedAt: derived.updatedAt } : existing.updatedAt ? { updatedAt: existing.updatedAt } : {}),
+	};
+	const meta = {
+		version: 1,
+		...(workspace.meta || {}),
+	} as RlmWorkspaceMeta;
+	if (workspace.activeContext.currentPlan) meta.activePlanRef = "globalThis.workspace.activeContext.currentPlan";
+	else delete meta.activePlanRef;
+	if (workspace.activeContext.currentArtifactRefs?.length) meta.activeArtifactRefs = [...workspace.activeContext.currentArtifactRefs];
+	else delete meta.activeArtifactRefs;
+	workspace.meta = meta;
+	return workspace;
 }
 
 function ensureArtifactIndexShape(value: unknown): RlmArtifactIndex {
@@ -56,7 +144,7 @@ export function ensureWorkspaceShape(value: unknown): RlmWorkspace {
 	workspace.meta = isRecord(workspace.meta)
 		? ({ version: 1, ...(workspace.meta as Record<string, unknown>) } as RlmWorkspace["meta"])
 		: { version: 1 };
-	return workspace;
+	return refreshWorkspaceProjection(workspace);
 }
 
 function extractArtifactFiles(artifact: Partial<RlmChildArtifact>): string[] | undefined {
@@ -130,7 +218,7 @@ export function recordArtifact(workspaceValue: unknown, artifactValue: RlmChildA
 		...(workspace.meta || {}),
 		updatedAt: artifact.producedAt,
 	};
-	return workspace;
+	return refreshWorkspaceProjection(workspace);
 }
 
 function createScalarPreview(value: unknown): unknown {
@@ -216,6 +304,155 @@ export function buildWorkspaceManifest(
 	};
 }
 
+export function buildWorkspaceWorkingSetSummary(workspaceValue: unknown): string | undefined {
+	if (!isRecord(workspaceValue)) return undefined;
+	const workspace = ensureWorkspaceShape(workspaceValue);
+	const active = workspace.activeContext;
+	if (!active) return undefined;
+	return active.summary;
+}
+
+const DEFAULT_RETENTION_LEASE_TURNS = 2;
+
+function buildRetentionConsolidationRef(summary: string | undefined): RlmConsolidationRef {
+	return {
+		kind: "workspace-path",
+		ref: "globalThis.workspace.activeContext",
+		...(summary ? { summary } : {}),
+	};
+}
+
+function buildLeaseId(input: { source: "assistant" | "tool"; sourceName?: string; turnIndex: number; messageFingerprint: string }): string {
+	return [input.source, input.sourceName ?? "assistant", input.turnIndex, input.messageFingerprint].join(":");
+}
+
+function refreshRetentionLeases(leases: RlmLease[] | undefined, latestTurnIndex: number, now: string): RlmLease[] {
+	return (leases ?? [])
+		.map((lease) => {
+			if (lease.status !== "consolidated" || typeof lease.expiresAfterTurns !== "number") return lease;
+			if (latestTurnIndex - lease.turnIndex < lease.expiresAfterTurns) return lease;
+			return {
+				...lease,
+				status: "expired",
+				updatedAt: now,
+			} as RlmLease;
+		})
+		.slice(-MAX_RETENTION_LEASES);
+}
+
+function consolidateLeases(
+	leases: RlmLease[] | undefined,
+	latestTurnIndex: number,
+	consolidatedTo: RlmConsolidationRef[] | undefined,
+	expiresAfterTurns: number,
+	now: string,
+): RlmLease[] {
+	return (leases ?? []).map((lease) => {
+		if (lease.status !== "live") return lease;
+		if (lease.turnIndex > latestTurnIndex) return lease;
+		return {
+			...lease,
+			status: "consolidated",
+			consolidatedTo: consolidatedTo ?? lease.consolidatedTo,
+			expiresAfterTurns: lease.expiresAfterTurns ?? expiresAfterTurns,
+			updatedAt: now,
+		} as RlmLease;
+	});
+}
+
+function fingerprintRetentionMetrics(metrics: RlmRetentionMetrics): string {
+	return [metrics.keptMessages, metrics.prunedMessages, metrics.placeholderMessages, metrics.retainedTurns, metrics.prunedTurns, metrics.activeContextSummary ?? ""].join(":");
+}
+
+export function recordRetentionLease(
+	workspaceValue: unknown,
+	input: {
+		source: "assistant" | "tool";
+		sourceName?: string;
+		turnIndex: number;
+		messageFingerprint: string;
+		expiresAfterTurns?: number;
+		consolidatedTo?: RlmConsolidationRef[];
+	},
+): RlmWorkspace | undefined {
+	if (!isRecord(workspaceValue)) return undefined;
+	const workspace = ensureWorkspaceShape(structuredClone(workspaceValue));
+	const now = new Date().toISOString();
+	const retention = workspace.retention ?? {};
+	const id = buildLeaseId(input);
+	const existing = retention.leases?.some((lease) => lease.id === id);
+	if (existing) return workspace;
+	const lease: RlmLease = {
+		id,
+		source: input.source,
+		sourceName: input.sourceName,
+		turnIndex: input.turnIndex,
+		messageFingerprint: input.messageFingerprint,
+		status: "live",
+		consolidatedTo: input.consolidatedTo,
+		expiresAfterTurns: input.expiresAfterTurns,
+		createdAt: now,
+		updatedAt: now,
+	};
+	workspace.retention = {
+		...retention,
+		leases: [...(retention.leases ?? []).filter((lease) => lease.id !== id), lease].slice(-MAX_RETENTION_LEASES),
+	};
+	return workspace;
+}
+
+export function recordRetentionMetrics(
+	workspaceValue: unknown,
+	latestMetrics: RlmRetentionMetrics,
+	latestTurnIndex: number,
+	policy?: Pick<RlmRetentionPolicy, "expireConsolidatedAfterTurns" | "keepLatestSurfaceSummary" >,
+): RlmWorkspace | undefined {
+	if (!isRecord(workspaceValue)) return undefined;
+	const workspace = ensureWorkspaceShape(structuredClone(workspaceValue));
+	const now = new Date().toISOString();
+	const currentRetention = workspace.retention ?? {};
+	const keepLatestSurfaceSummary = policy?.keepLatestSurfaceSummary ?? true;
+	const summary = latestMetrics.activeContextSummary ?? (keepLatestSurfaceSummary ? currentRetention.latestSurfaceSummary : undefined);
+	const expiresAfterTurns = policy?.expireConsolidatedAfterTurns ?? DEFAULT_RETENTION_LEASE_TURNS;
+	const consolidationRefs = summary ? [buildRetentionConsolidationRef(summary)] : undefined;
+	const lease: RlmLease = {
+		id: `retention-${latestTurnIndex}-${latestMetrics.keptMessages}-${latestMetrics.prunedMessages}`,
+		source: "assistant",
+		sourceName: "rlm-retention",
+		turnIndex: latestTurnIndex,
+		messageFingerprint: `${latestMetrics.keptMessages}:${latestMetrics.prunedMessages}:${latestMetrics.placeholderMessages}:${latestMetrics.retainedTurns}:${latestMetrics.prunedTurns}`,
+		status: "consolidated",
+		consolidatedTo: consolidationRefs,
+		expiresAfterTurns,
+		createdAt: now,
+		updatedAt: now,
+	};
+	const currentFingerprint = currentRetention.latestMetrics ? fingerprintRetentionMetrics(currentRetention.latestMetrics) : undefined;
+	const nextFingerprint = fingerprintRetentionMetrics(latestMetrics);
+	const existingLease = currentRetention.leases?.some((item) => item.id === lease.id) ?? false;
+	if (currentRetention.latestTurnIndex === latestTurnIndex && currentFingerprint === nextFingerprint && existingLease) return workspace;
+	const consolidatedLeases = consolidateLeases(currentRetention.leases, latestTurnIndex, consolidationRefs, expiresAfterTurns, now);
+	const refreshedLeases = refreshRetentionLeases(consolidatedLeases, latestTurnIndex, now).filter((item) => item.id !== lease.id);
+	workspace.retention = {
+		...currentRetention,
+		latestMetrics,
+		latestTurnIndex,
+		...(summary ? { latestSurfaceSummary: summary } : {}),
+		leases: [...refreshedLeases, lease].slice(-MAX_RETENTION_LEASES),
+	};
+	return workspace;
+}
+
+export function buildWorkspacePointerHints(workspaceValue: unknown): string | undefined {
+	if (!isRecord(workspaceValue)) return undefined;
+	ensureWorkspaceShape(workspaceValue);
+	return [
+		"- Inspect globalThis.workspace.activeContext first.",
+		"- Durable notebook: globalThis.workspace",
+		"- Parent-provided local state: globalThis.parentState",
+	].join("\n");
+}
+
 function tokenizePrompt(prompt: string): string[] {
 	return Array.from(new Set(prompt.toLowerCase().match(/[a-z0-9_./-]{3,}/g) ?? [])).slice(0, 24);
 }
@@ -256,11 +493,11 @@ export function selectRelevantWorkspaceSectionKeys(role: LlmQueryRole, workspace
 	if (!isRecord(workspaceValue)) return [];
 	const workspace = ensureWorkspaceShape(workspaceValue);
 	const byRole: Record<LlmQueryRole, string[]> = {
-		general: ["goal", "plan", "files", "findings", "partialOutputs", "childArtifacts"],
-		scout: ["files", "findings", "childArtifacts", "openQuestions"],
-		planner: ["goal", "plan", "openQuestions", "partialOutputs", "childArtifacts"],
-		worker: ["files", "findings", "partialOutputs", "childArtifacts"],
-		reviewer: ["findings", "partialOutputs", "childArtifacts", "openQuestions"],
+		general: ["goal", "plan", "activeContext", "files", "findings", "partialOutputs", "childArtifacts"],
+		scout: ["activeContext", "files", "findings", "childArtifacts", "openQuestions"],
+		planner: ["activeContext", "goal", "plan", "openQuestions", "partialOutputs", "childArtifacts"],
+		worker: ["activeContext", "files", "findings", "partialOutputs", "childArtifacts"],
+		reviewer: ["activeContext", "findings", "partialOutputs", "childArtifacts", "openQuestions"],
 	};
 	return byRole[role].filter((key) => key in workspace);
 }

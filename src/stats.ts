@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { findBootstrapSnapshot, findLatestSnapshot } from "./restore.js";
 import { DEFAULT_RLM_PROMPT_MODE, findRlmPromptMode } from "./prompt-mode.js";
+import { ensureWorkspaceShape } from "./workspace.js";
 import type { RlmPromptMode, RlmSessionStats, RuntimeSnapshot } from "./types.js";
 
 const EMPTY_SNAPSHOT: RuntimeSnapshot = {
@@ -23,6 +24,13 @@ function findRlmModeEnabled(ctx: ExtensionContext): boolean {
 function getVarCount(snapshot: RuntimeSnapshot): number {
 	if (snapshot.entries?.length) return snapshot.entries.length;
 	return Object.keys(snapshot.bindings || {}).length;
+}
+
+function getActiveContextRefCount(snapshot: RuntimeSnapshot): number {
+	const workspace = snapshot.bindings.workspace;
+	if (!workspace || typeof workspace !== "object" || Array.isArray(workspace)) return 0;
+	const normalized = ensureWorkspaceShape(workspace);
+	return normalized.activeContext?.currentArtifactRefs?.length ?? normalized.meta?.activeArtifactRefs?.length ?? 0;
 }
 
 export function collectRlmSessionStats(
@@ -63,6 +71,7 @@ export function collectRlmSessionStats(
 		childQueryCount,
 		childTurns,
 		runtimeVarCount: getVarCount(snapshot),
+		activeContextRefCount: getActiveContextRefCount(snapshot),
 		leafToolCount,
 	};
 }

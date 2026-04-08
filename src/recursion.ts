@@ -18,7 +18,7 @@ import {
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { BUDGET_PRESETS, buildChildPrompt, normalizeLlmQueryInput, parseChildResult } from "./llm-query.js";
 import { buildChildArtifactFromBranch, composeRuntimeSnapshot, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
-import { buildWorkspaceManifest, ensureWorkspaceShape, splitInternalLlmQueryContext } from "./workspace.js";
+import { buildWorkspacePointerHints, buildWorkspaceWorkingSetSummary, ensureWorkspaceShape, splitInternalLlmQueryContext } from "./workspace.js";
 import type {
 	LlmQueryRequest,
 	LlmQueryResult,
@@ -144,29 +144,39 @@ function seedSessionManager(
 	}
 }
 
-function buildForcedFinalizePrompt(args: {
+function buildStateKeyHint(state: Record<string, unknown> | undefined): string | undefined {
+	if (!state) return undefined;
+	const keys = Object.keys(state).filter((key) => typeof key === "string" && key.trim().length > 0);
+	return keys.length > 0 ? keys.slice(0, 8).join(", ") : undefined;
+}
+
+export function buildForcedFinalizePrompt(args: {
 	prompt: string;
 	artifact: ChildArtifact;
 	outputMode: "text" | "json";
 	schema?: Record<string, string>;
 }): string {
 	const sections: string[] = [];
-	const workspaceManifest = buildWorkspaceManifest(args.artifact.workspace, {
-		sectionKeys: ["goal", "plan", "files", "findings", "partialOutputs", "childArtifacts"],
-	});
+	const workingSetPointers = buildWorkspacePointerHints(args.artifact.workspace);
+	const workingSetSummary = buildWorkspaceWorkingSetSummary(args.artifact.workspace);
+	const stateKeys = buildStateKeyHint(args.artifact.state);
 	sections.push("You are a recursive RLM child node resuming from previously gathered child state.");
-	sections.push(`Original task:\n${args.prompt}`);
-	sections.push("Runtime state access:\n- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState\n- Input alias: globalThis.input");
+	sections.push("Runtime state access:");
+	sections.push(workingSetPointers ?? "- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState");
+	sections.push("- Input alias: globalThis.input");
+	if (workingSetSummary) {
+		sections.push(`Restored working set:\n${workingSetSummary}`);
+	}
+	if (stateKeys) {
+		sections.push(`Restored state keys: ${stateKeys}`);
+	}
 	if (args.artifact.summary) {
 		sections.push(`Current child summary:\n${args.artifact.summary}`);
-	}
-	if (workspaceManifest && Object.keys(workspaceManifest.sections).length > 0) {
-		sections.push(`Workspace metadata:\n${JSON.stringify(workspaceManifest, null, 2)}`);
 	}
 	sections.push("Rules:");
 	sections.push("- No tools are available in this finalization step.");
 	sections.push("- Use the restored runtime state and recorded child artifacts only.");
-	sections.push("- Treat prompt metadata as an index to runtime state, not as the full state.");
+	sections.push("- Inspect globalThis.workspace.activeContext first and use pointers instead of replaying transcript history.");
 	sections.push("- If reusable findings already exist in runtime/workspace, preserve that structure and finalize from it.");
 	sections.push("- Do not continue exploration or ask for more work.");
 	sections.push("- Return the best final answer now.");
@@ -178,6 +188,7 @@ function buildForcedFinalizePrompt(args: {
 	} else {
 		sections.push("- Return only the final useful answer, without extra preamble.");
 	}
+	sections.push(`Original task:\n${args.prompt}`);
 	return sections.join("\n\n");
 }
 

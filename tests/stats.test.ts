@@ -49,6 +49,7 @@ describe("collectRlmSessionStats", () => {
 			childQueryCount: 2,
 			childTurns: 5,
 			runtimeVarCount: 2,
+			activeContextRefCount: 0,
 			leafToolCount: 2,
 		});
 	});
@@ -65,6 +66,7 @@ describe("collectRlmSessionStats", () => {
 			childQueryCount: 0,
 			childTurns: 0,
 			runtimeVarCount: 0,
+			activeContextRefCount: 0,
 			leafToolCount: 0,
 		});
 	});

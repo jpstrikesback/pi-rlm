@@ -14,6 +14,8 @@ export type EvalScenario = {
 	description: string;
 	cwd: string;
 	corpusSummary: string[];
+	extensionFlags?: Record<string, string | boolean>;
+	setupPrompts?: string[];
 	turns: EvalTurn[];
 };
 
@@ -23,6 +25,14 @@ export type ProxyUsage = {
 	totalTokens: number;
 	cacheHitTokens: number;
 	cacheMissTokens: number;
+};
+
+export type EvalContextStats = {
+	eventCount: number;
+	lastMessageCount?: number;
+	lastEstimatedChars?: number;
+	maxMessageCount?: number;
+	maxEstimatedChars?: number;
 };
 
 export type ProxyLogEntry = {
@@ -70,6 +80,7 @@ export type EvalTurnResult = {
 	firstRequestCanonical: string;
 	firstRequestSharedPrefixCharsVsPreviousTurn?: number;
 	firstRequestSharedPrefixRatioVsPreviousTurn?: number;
+	context?: EvalContextStats;
 };
 
 export type EvalRunResult = {
@@ -113,6 +124,12 @@ export type EvalRunResult = {
 		totalRlmExecCount: number;
 		totalChildQueryCount: number;
 		totalChildTurns: number;
+		context?: {
+			maxMessageCount?: number;
+			maxEstimatedChars?: number;
+			lastMessageCount?: number;
+			lastEstimatedChars?: number;
+		};
 	};
 };
 

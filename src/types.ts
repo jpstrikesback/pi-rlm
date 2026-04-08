@@ -106,9 +106,75 @@ export type RlmArtifactIndex = {
 	recentIds?: string[];
 };
 
+export type RlmActiveContext = {
+	goal?: string;
+	currentPlan?: string | string[];
+	relevantFiles?: string[];
+	currentQuestions?: string[];
+	currentFindingsRefs?: string[];
+	currentArtifactRefs?: string[];
+	summary?: string;
+	updatedAt?: string;
+};
+
+export type RlmRetentionMetrics = {
+	version: 1;
+	keptMessages: number;
+	prunedMessages: number;
+	placeholderMessages: number;
+	retainedTurns: number;
+	prunedTurns: number;
+	activeContextSummary?: string;
+};
+
+export type RlmRetentionPolicy = {
+	keepRecentUserTurns: number;
+	keepRecentAssistantTurns: number;
+	keepRecentToolTurns: number;
+	expireConsolidatedAfterTurns: number;
+	replaceExpiredWithReference: boolean;
+	keepUnresolvedToolFlows: boolean;
+	keepLatestSurfaceSummary: boolean;
+};
+
+export type RlmRetentionEntry = {
+	version: 1;
+	turnIndex: number;
+	policy: RlmRetentionPolicy;
+	metrics: RlmRetentionMetrics;
+	workspaceSummary?: string;
+};
+
+export type RlmConsolidationRef = {
+	kind: "workspace-path" | "artifact-id" | "partial-output";
+	ref: string;
+	summary?: string;
+};
+
+export type RlmToolSurfaceResult = {
+	text: string;
+	refs?: RlmConsolidationRef[];
+	details?: unknown;
+};
+
+export type RlmLease = {
+	id: string;
+	source: "assistant" | "tool";
+	sourceName?: string;
+	turnIndex: number;
+	messageFingerprint: string;
+	status: "live" | "consolidated" | "expired";
+	consolidatedTo?: RlmConsolidationRef[];
+	expiresAfterTurns?: number;
+	createdAt: string;
+	updatedAt: string;
+};
+
 export type RlmWorkspaceMeta = {
 	version: 1;
 	updatedAt?: string;
+	activePlanRef?: string;
+	activeArtifactRefs?: string[];
 };
 
 export type RlmWorkspace = Record<string, unknown> & {
@@ -122,6 +188,13 @@ export type RlmWorkspace = Record<string, unknown> & {
 	childArtifactSummaries?: RlmArtifactSummary[];
 	lastChildArtifact?: RlmChildArtifact;
 	artifactIndex?: RlmArtifactIndex;
+	activeContext?: RlmActiveContext;
+	retention?: {
+		latestMetrics?: RlmRetentionMetrics;
+		latestTurnIndex?: number;
+		latestSurfaceSummary?: string;
+		leases?: RlmLease[];
+	};
 	meta?: RlmWorkspaceMeta;
 };
 
@@ -241,5 +314,6 @@ export type RlmSessionStats = {
 	childQueryCount: number;
 	childTurns: number;
 	runtimeVarCount: number;
+	activeContextRefCount: number;
 	leafToolCount: number;
 };

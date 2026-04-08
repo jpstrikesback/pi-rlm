@@ -31,7 +31,7 @@ describe("llmQuery normalization", () => {
 });
 
 describe("buildChildPrompt", () => {
-	it("includes role, runtime access, metadata manifests, and json schema guidance", () => {
+	it("keeps the active working set and task ordering compact", () => {
 		const prompt = buildChildPrompt(
 			normalizeLlmQueryInput({
 				prompt: "Summarize these files",
@@ -68,18 +68,17 @@ describe("buildChildPrompt", () => {
 		);
 
 		expect(prompt).toContain("Role: scout");
-		expect(prompt).toContain("Task:\nSummarize these files");
-		expect(prompt).toContain("Durable notebook: globalThis.workspace");
-		expect(prompt).toContain("Parent state metadata:");
-		expect(prompt).toContain("Workspace metadata:");
-		expect(prompt).toContain('"path": "globalThis.parentState"');
-		expect(prompt).toContain('"workspacePath": "globalThis.workspace"');
-		expect(prompt).toContain('"id": "child-1"');
-		expect(prompt).toContain("Treat prompt metadata as an index to runtime state");
-		expect(prompt).toContain("store reusable intermediate findings in globalThis.workspace");
+		expect(prompt).toContain("Runtime state access:");
+		expect(prompt).toContain("Inspect globalThis.workspace.activeContext first.");
+		expect(prompt).toContain("Active working set:");
+		expect(prompt).toContain("Goal: refactor");
+		expect(prompt).toContain("Files: src/a.ts, src/b.ts");
+		expect(prompt).toContain("Parent state keys: files, findings");
 		expect(prompt).toContain("Return valid JSON only");
 		expect(prompt).toContain('"summary": "string"');
-		expect(prompt).toContain("Finish within 3 turns.");
+		expect(prompt).toContain("Task:\nSummarize these files");
+		expect(prompt.indexOf("Active working set:")).toBeLessThan(prompt.indexOf("Task:\nSummarize these files"));
+		expect(prompt.indexOf("Parent state keys:")).toBeLessThan(prompt.indexOf("Task:\nSummarize these files"));
 	});
 });
 
