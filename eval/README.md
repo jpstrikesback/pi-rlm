@@ -41,14 +41,11 @@ Current profiles:
 - `openai-chat` — OpenAI-compatible chat/completions
 - `openai-responses` — OpenAI Responses API
 
-The provider profile controls:
+The provider profile is currently used to:
 
-- Pi provider API registration (`openai-completions` vs `openai-responses`)
-- auth behavior (`Authorization` header on/off)
-- default upstream base URL
-- default API key env var
-- usage parsing rules
-- cache field mapping into normalized eval metrics
+- label eval runs consistently
+- provide default provider lookup candidates when resolving models/auth
+- keep scenario grouping stable across runs
 
 ## Normalized metrics
 
@@ -60,37 +57,7 @@ The harness normalizes provider usage into the same output fields:
 - `cacheHitTokens`
 - `cacheMissTokens`
 
-### Cache field mapping by profile
-
-#### `mlx`
-
-Uses OpenAI-compatible chat/completions usage fields returned by `mlx_lm.server`:
-
-- `promptTokens <- usage.prompt_tokens`
-- `completionTokens <- usage.completion_tokens`
-- `totalTokens <- usage.total_tokens`
-- `cacheHitTokens <- usage.prompt_tokens_details.cached_tokens`
-- `cacheMissTokens <- usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens`
-
-#### `openai-chat`
-
-Uses OpenAI-style chat/completions usage fields:
-
-- `promptTokens <- usage.prompt_tokens`
-- `completionTokens <- usage.completion_tokens`
-- `totalTokens <- usage.total_tokens`
-- `cacheHitTokens <- usage.prompt_tokens_details.cached_tokens`
-- `cacheMissTokens <- usage.prompt_tokens - usage.prompt_tokens_details.cached_tokens`
-
-#### `openai-responses`
-
-Uses Responses API usage fields:
-
-- `promptTokens <- usage.input_tokens`
-- `completionTokens <- usage.output_tokens`
-- `totalTokens <- usage.total_tokens`
-- `cacheHitTokens <- usage.input_tokens_details.cached_tokens`
-- `cacheMissTokens <- usage.input_tokens - usage.input_tokens_details.cached_tokens`
+Token metrics are derived from Pi-native assistant usage events captured by `pi-spy`, then normalized into the fields above for comparison output.
 
 ## Scenarios
 

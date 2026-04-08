@@ -9,7 +9,6 @@ type PendingRequest = {
 
 const EXEC_TIMEOUT_MS = 120000;
 const DEFAULT_TIMEOUT_MS = 5000;
-const VM_SYNC_TIMEOUT_MS = 1000;
 
 function createWorkerSource() {
 	function workerMain() {

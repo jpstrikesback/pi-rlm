@@ -45,15 +45,6 @@ const RESET = "\x1b[0m";
 const MAX_VISIBLE_CHILDREN = 8;
 const LIVE_UPDATE_THROTTLE_MS = 120;
 
-function safePreview(value: unknown): string {
-	try {
-		const text = JSON.stringify(value);
-		return text ?? String(value);
-	} catch {
-		return String(value);
-	}
-}
-
 function hashFingerprint(input: string): string {
 	return createHash("sha1").update(input).digest("hex").slice(0, 12);
 }
@@ -109,12 +100,6 @@ function findRlmModeEnabled(ctx: ExtensionContext): boolean {
 		return !!data?.enabled;
 	}
 	return false;
-}
-
-function formatStats(stats: RlmSessionStats): string {
-	const mode = getRlmPromptModeLabel(stats.promptMode);
-	const child = stats.childTurns > 0 ? `${stats.childQueryCount}/${stats.childTurns}t` : `${stats.childQueryCount}`;
-	return `RLM ${mode} · d ${stats.depth}/${stats.maxDepth} · exec ${stats.execCount} · child ${child} · vars ${stats.runtimeVarCount} · act ${stats.activeContextRefCount} · leaf ${stats.leafToolCount}`;
 }
 
 function applyModeWidget(ctx: ExtensionContext, enabled: boolean, promptMode: RlmPromptMode, root: boolean) {
