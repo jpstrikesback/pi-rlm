@@ -7,7 +7,11 @@ import type {
 	NormalizedLlmQueryRequest,
 	RlmWorkspace,
 } from "./types.js";
-import { buildWorkspacePointerHints, buildWorkspaceWorkingSetSummary } from "./workspace.js";
+import {
+	buildCompiledPromptContext,
+	renderCompiledPromptContext,
+	buildWorkspacePointerHints,
+} from "./workspace.js";
 
 export const BUDGET_PRESETS: Record<LlmQueryBudgetPreset, LlmQueryBudget> = {
 	low: { maxDepth: 1, maxTurns: 3 },
@@ -54,6 +58,7 @@ export function normalizeLlmQueryInput(input: LlmQueryRequest): NormalizedLlmQue
 		state: cloneState(input.state),
 		tools: input.tools ?? "read-only",
 		budget: normalizeBudget(input.budget),
+		model: typeof input.model === "string" && input.model.trim().length > 0 ? (input.model.trim() as NormalizedLlmQueryRequest["model"]) : undefined,
 		output: normalizeOutput(input.output),
 	};
 }
@@ -71,26 +76,37 @@ function buildParentStateKeyHint(state: Record<string, unknown> | undefined): st
 export function buildChildPrompt(input: NormalizedLlmQueryRequest, context: BuildChildPromptContext = {}): string {
 	const sections: string[] = [];
 	const workingSetPointers = buildWorkspacePointerHints(context.workspace);
-	const workingSetSummary = buildWorkspaceWorkingSetSummary(context.workspace);
 	const parentStateKeys = buildParentStateKeyHint(input.state);
+	const compiled = buildCompiledPromptContext(context.workspace ?? undefined, {
+		prompt: input.prompt,
+		role: input.role,
+		parentState: input.state,
+		evidenceItemLimit: 4,
+		evidenceCheckpointLimit: 3,
+		artifactLimit: 4,
+		exactValueLimit: 2,
+	});
 
 	sections.push("You are a recursive RLM child node.");
 	sections.push(`Role: ${input.role}`);
+	sections.push("Compiled working set:");
+	sections.push(renderCompiledPromptContext(compiled, {
+		title: "Deterministic compiled child working set from externalized state.",
+	}));
 	sections.push("Runtime state access:");
-	sections.push(workingSetPointers ?? "- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState");
-	sections.push("- Input alias: globalThis.input");
-	if (workingSetSummary) {
-		sections.push(`Active working set:\n${workingSetSummary}`);
-	}
-	if (parentStateKeys) {
-		sections.push(`Parent state keys: ${parentStateKeys}`);
-	}
+	sections.push(workingSetPointers ?? "- Task snapshot: globalThis.context\n- Deterministic compiled working set: globalThis.context.compiledContext\n- Inspect globalThis.workspace.activeContext first.\n- Durable notebook: globalThis.workspace\n- Recent history metadata only: globalThis.history\n- Parent-provided local state: globalThis.parentState\n- Input alias: globalThis.input");
+	if (parentStateKeys) sections.push(`Parent state keys: ${parentStateKeys}`);
 
 	sections.push("Rules:");
 	sections.push("- Solve only the requested subproblem.");
-	sections.push("- Inspect globalThis.workspace.activeContext first and reuse current artifact refs before rediscovering information.");
+	sections.push("- Treat globalThis.context.compiledContext as the primary prompt-visible working set.");
+	sections.push("- Inspect globalThis.context first, then globalThis.workspace.activeContext.");
+	sections.push("- Treat globalThis.history as minimal metadata only, not working memory.");
+	sections.push("- Use llm_query for simple extraction or summarization and rlm_query for deeper iterative work.");
+	sections.push("- Reuse selected handles, workspace state, and artifact refs before rediscovering information.");
 	sections.push("- Treat prompt metadata as a pointer to runtime state, not as the full state.");
-	sections.push("- If you use rlm_exec, store reusable intermediate findings in globalThis.workspace (for example findings, files, partialOutputs, or openQuestions) before finalizing.");
+	sections.push("- Batch independent subtasks with llm_query_batched or rlm_query_batched instead of many tiny sequential calls.");
+	sections.push("- After any meaningful leaf-tool work or reusable finding, call globalThis.workspace.commit({...}) before finalizing.");
 	sections.push("- Keep the final answer compact, structured, and easy for the parent to reuse.");
 	if (input.budget.maxTurns) sections.push(`- Finish within ${input.budget.maxTurns} turns.`);
 
@@ -102,6 +118,7 @@ export function buildChildPrompt(input: NormalizedLlmQueryRequest, context: Buil
 	} else {
 		sections.push("- Return only the final useful answer, without extra preamble.");
 	}
+	if (input.model) sections.push(`Requested child model: ${input.model}`);
 
 	sections.push(`Task:\n${input.prompt}`);
 

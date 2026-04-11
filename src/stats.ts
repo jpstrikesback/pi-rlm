@@ -1,8 +1,8 @@
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { findBootstrapSnapshot, findLatestSnapshot } from "./restore.js";
-import { DEFAULT_RLM_PROMPT_MODE, findRlmPromptMode } from "./prompt-mode.js";
 import { ensureWorkspaceShape } from "./workspace.js";
-import type { RlmPromptMode, RlmSessionStats, RuntimeSnapshot } from "./types.js";
+import { DEFAULT_PROFILE_NAME, RLM_PROFILE_TYPE } from "./profiles.js";
+import type { RlmSessionStats, RuntimeSnapshot } from "./types.js";
 
 const EMPTY_SNAPSHOT: RuntimeSnapshot = {
 	version: 1,
@@ -33,6 +33,17 @@ function getActiveContextRefCount(snapshot: RuntimeSnapshot): number {
 	return normalized.activeContext?.currentArtifactRefs?.length ?? normalized.meta?.activeArtifactRefs?.length ?? 0;
 }
 
+function findRlmProfile(ctx: ExtensionContext): string | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "custom" || entry.customType !== RLM_PROFILE_TYPE) continue;
+		const data = entry.data as { profile?: string } | undefined;
+		if (typeof data?.profile === "string" && data.profile.trim().length > 0) return data.profile;
+	}
+	return undefined;
+}
+
 export function collectRlmSessionStats(
 	ctx: ExtensionContext,
 	options: { depth: number; maxDepth: number },
@@ -59,12 +70,12 @@ export function collectRlmSessionStats(
 		leafToolCount += 1;
 	}
 
-	const promptMode: RlmPromptMode = findRlmPromptMode(ctx) ?? DEFAULT_RLM_PROMPT_MODE;
+	const profile = findRlmProfile(ctx) ?? DEFAULT_PROFILE_NAME;
 	const snapshot = runtimeSnapshot ?? findLatestSnapshot(ctx) ?? findBootstrapSnapshot(ctx) ?? EMPTY_SNAPSHOT;
 
 	return {
 		enabled: findRlmModeEnabled(ctx),
-		promptMode,
+		profile,
 		depth: options.depth,
 		maxDepth: options.maxDepth,
 		execCount,

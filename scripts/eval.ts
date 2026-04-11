@@ -12,7 +12,14 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import { canonicalizeProviderPayload, longestCommonPrefixChars, safeRatio } from "./eval/metrics.js";
+import {
+	analyzeAssistantPathCitations,
+	analyzeCommitTruthfulness,
+	canonicalizeProviderPayload,
+	computeRepeatedReadRatio,
+	longestCommonPrefixChars,
+	safeRatio,
+} from "./eval/metrics.js";
 import { findProviderProfile, getProviderProfiles } from "./eval/provider-profiles.js";
 import { findScenario, getEvalScenarios, getPinnedPiVersion, getRepoRoot } from "./eval/scenarios.js";
 import type {
@@ -20,6 +27,7 @@ import type {
 	EvalContextStats,
 	EvalRunResult,
 	EvalScenario,
+	EvalSubmodelOverride,
 	EvalToolEvent,
 	EvalTurnResult,
 	ProxyLogEntry,
@@ -56,6 +64,14 @@ type SpyContextSample = {
 	estimatedChars?: number;
 };
 
+type TurnWorkspaceStats = {
+	commitCount: number;
+	workspaceCommits: EvalTurnResult["workspaceCommits"];
+	committedAfterLeafTools: boolean;
+	committedBeforeLeafTools: boolean;
+	workspaceState?: EvalTurnResult["workspaceState"];
+};
+
 async function main() {
 	const [command = "help", ...rest] = process.argv.slice(2);
 	const args = parseArgs(rest);
@@ -86,12 +102,15 @@ async function runCommand(args: CliArgs) {
 	const modelId = requireArg(args, "modelId");
 	const label = String(args.label ?? path.basename(subject));
 
+	const extensionFlags = {
+		...parseExtensionFlagsArg(stringArg(args, "extensionFlags")),
+	};
 	for (const scenario of scenarios) {
 		const result = await runNativeScenario({
 			subjectEntrypoint: subject,
 			spyEntrypoint: requireArg(args, "spyEntrypoint"),
 			subjectLabel: label,
-			scenario,
+			scenario: withScenarioExtensionFlags(scenario, extensionFlags),
 			modelId,
 			providerProfile,
 			modelProviderOverride: stringArg(args, "modelProvider"),
@@ -113,10 +132,20 @@ async function compareCommand(args: CliArgs) {
 	const providerProfile = findProviderProfile(stringArg(args, "providerProfile"));
 	const modelId = requireArg(args, "modelId");
 
+	const commonExtensionFlags = {
+		...parseExtensionFlagsArg(stringArg(args, "extensionFlags")),
+	};
+	const baselineExtensionFlags = {
+		...commonExtensionFlags,
+		...parseExtensionFlagsArg(stringArg(args, "baselineExtensionFlags")),
+	};
+	const candidateExtensionFlags = {
+		...commonExtensionFlags,
+		...parseExtensionFlagsArg(stringArg(args, "candidateExtensionFlags")),
+	};
 	for (const scenario of scenarios) {
 		const shared = {
 			spyEntrypoint: requireArg(args, "spyEntrypoint"),
-			scenario,
 			modelId,
 			providerProfile,
 			modelProviderOverride: stringArg(args, "modelProvider"),
@@ -125,16 +154,18 @@ async function compareCommand(args: CliArgs) {
 			isolatedAuth: booleanArg(args, "isolatedAuth") ?? false,
 			apiKeySource: stringArg(args, "apiKey"),
 			reasoning: booleanArg(args, "reasoning") ?? false,
-		} satisfies Omit<NativeRunOptions, "subjectEntrypoint" | "subjectLabel">;
+		} satisfies Omit<NativeRunOptions, "subjectEntrypoint" | "subjectLabel" | "scenario">;
 
 		const baselineResult = await runNativeScenario({
 			subjectEntrypoint: baseline,
 			subjectLabel: String(args.baselineLabel ?? "baseline"),
+			scenario: withScenarioExtensionFlags(scenario, baselineExtensionFlags),
 			...shared,
 		});
 		const candidateResult = await runNativeScenario({
 			subjectEntrypoint: candidate,
 			subjectLabel: String(args.candidateLabel ?? "candidate"),
+			scenario: withScenarioExtensionFlags(scenario, candidateExtensionFlags),
 			...shared,
 		});
 
@@ -154,6 +185,26 @@ async function compareCommand(args: CliArgs) {
 				rlmExecCount: candidateResult.summary.totalRlmExecCount - baselineResult.summary.totalRlmExecCount,
 				childQueryCount: candidateResult.summary.totalChildQueryCount - baselineResult.summary.totalChildQueryCount,
 				childTurns: candidateResult.summary.totalChildTurns - baselineResult.summary.totalChildTurns,
+				attemptedSimpleQueryCount: candidateResult.summary.totalAttemptedSimpleQueryCount - baselineResult.summary.totalAttemptedSimpleQueryCount,
+				attemptedSimpleBatchCount: candidateResult.summary.totalAttemptedSimpleBatchCount - baselineResult.summary.totalAttemptedSimpleBatchCount,
+				attemptedRecursiveQueryCount: candidateResult.summary.totalAttemptedRecursiveQueryCount - baselineResult.summary.totalAttemptedRecursiveQueryCount,
+				attemptedRecursiveBatchCount: candidateResult.summary.totalAttemptedRecursiveBatchCount - baselineResult.summary.totalAttemptedRecursiveBatchCount,
+				simpleQueryCount: candidateResult.summary.totalSimpleQueryCount - baselineResult.summary.totalSimpleQueryCount,
+				simpleBatchCount: candidateResult.summary.totalSimpleBatchCount - baselineResult.summary.totalSimpleBatchCount,
+				recursiveQueryCount: candidateResult.summary.totalRecursiveQueryCount - baselineResult.summary.totalRecursiveQueryCount,
+				recursiveBatchCount: candidateResult.summary.totalRecursiveBatchCount - baselineResult.summary.totalRecursiveBatchCount,
+				submodelOverrideCount: candidateResult.summary.totalSubmodelOverrideCount - baselineResult.summary.totalSubmodelOverrideCount,
+				showVarsCount: candidateResult.summary.totalShowVarsCount - baselineResult.summary.totalShowVarsCount,
+				workspaceCommits: candidateResult.summary.totalWorkspaceCommits - baselineResult.summary.totalWorkspaceCommits,
+				postLeafCommitRate: (candidateResult.summary.postLeafCommitRate ?? 0) - (baselineResult.summary.postLeafCommitRate ?? 0),
+				falseCommitClaimTurns: candidateResult.summary.falseCommitClaimTurns - baselineResult.summary.falseCommitClaimTurns,
+				missingPathCitations: candidateResult.summary.missingPathCitations - baselineResult.summary.missingPathCitations,
+				pathExistenceRate: (candidateResult.summary.pathExistenceRate ?? 0) - (baselineResult.summary.pathExistenceRate ?? 0),
+				runtimeNewBindingCount: candidateResult.summary.totalRuntimeNewBindingCount - baselineResult.summary.totalRuntimeNewBindingCount,
+				runtimeUpdatedBindingCount: candidateResult.summary.totalRuntimeUpdatedBindingCount - baselineResult.summary.totalRuntimeUpdatedBindingCount,
+				repeatedReadRatio: (candidateResult.summary.repeatedReadRatio ?? 0) - (baselineResult.summary.repeatedReadRatio ?? 0),
+				staleRecoveryRate: (candidateResult.summary.staleRecoveryRate ?? 0) - (baselineResult.summary.staleRecoveryRate ?? 0),
+				plateauRatio: (candidateResult.summary.plateauRatio ?? 0) - (baselineResult.summary.plateauRatio ?? 0),
 			},
 		};
 
@@ -176,6 +227,37 @@ async function snapshotBaseline(args: CliArgs) {
 	console.log(`Saved baseline artifact to ${target}`);
 }
 
+function replaceScenarioTokens(text: string, replacements: Record<string, string>): string {
+	let next = text;
+	for (const [token, value] of Object.entries(replacements)) {
+		next = next.split(token).join(value);
+	}
+	return next;
+}
+
+async function materializeScenarioForRun(scenario: EvalScenario, runRoot: string): Promise<EvalScenario> {
+	const runId = path.basename(runRoot);
+	const svgOutputPath = path.join("eval", "generated", `${scenario.id}-${runId}.svg`);
+	const svgPreviewPath = path.join("eval", "generated", `${scenario.id}-${runId}.png`);
+	const replacements = {
+		"{{SVG_OUTPUT_PATH}}": svgOutputPath,
+		"{{SVG_PREVIEW_PATH}}": svgPreviewPath,
+	};
+	const absoluteSvgOutputPath = path.join(getRepoRoot(), svgOutputPath);
+	const absoluteSvgPreviewPath = path.join(getRepoRoot(), svgPreviewPath);
+	await mkdir(path.dirname(absoluteSvgOutputPath), { recursive: true });
+	await rm(absoluteSvgOutputPath, { force: true });
+	await rm(absoluteSvgPreviewPath, { force: true });
+	return {
+		...scenario,
+		setupPrompts: scenario.setupPrompts?.map((prompt) => replaceScenarioTokens(prompt, replacements)),
+		turns: scenario.turns.map((turn) => ({
+			...turn,
+			prompt: replaceScenarioTokens(turn.prompt, replacements),
+		})),
+	};
+}
+
 async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResult> {
 	const subjectEntrypoint = await resolveSubjectEntrypoint(options.subjectEntrypoint);
 	const runRoot = await mkdtemp(path.join(os.tmpdir(), "pi-rlm-eval-native-"));
@@ -183,6 +265,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 	const spyLogPath = path.join(runRoot, "pi-spy.jsonl");
 	await mkdir(sessionAgentDir, { recursive: true });
 
+	const scenario = await materializeScenarioForRun(options.scenario, runRoot);
 	const effectiveAuthAgentDir = options.isolatedAuth ? sessionAgentDir : options.authAgentDir;
 	await mkdir(effectiveAuthAgentDir, { recursive: true });
 	const fileAuthStorage = AuthStorage.create(path.join(effectiveAuthAgentDir, "auth.json"));
@@ -256,6 +339,15 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 		let currentRlmExecCount = 0;
 		let currentChildQueryCount = 0;
 		let currentChildTurns = 0;
+		let currentSimpleQueryCount = 0;
+		let currentSimpleBatchCount = 0;
+		let currentRecursiveQueryCount = 0;
+		let currentRecursiveBatchCount = 0;
+		let currentSubmodelOverrideCount = 0;
+		let currentSubmodelOverrides: EvalSubmodelOverride[] = [];
+		let currentShowVarsCount = 0;
+		let currentFinalAliasUsed = false;
+		let currentFinalVarAliasUsed = false;
 		let currentAssistantUsage: ProxyUsage = emptyUsage();
 		let currentAssistantStopReason: string | undefined;
 		let currentAssistantErrorMessage: string | undefined;
@@ -280,6 +372,15 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 					const details = (event.result as { details?: Record<string, unknown> } | undefined)?.details;
 					currentChildQueryCount += typeof details?.childQueryCount === "number" ? details.childQueryCount : 0;
 					currentChildTurns += typeof details?.childTurns === "number" ? details.childTurns : 0;
+					currentSimpleQueryCount += typeof details?.simpleQueryCount === "number" ? details.simpleQueryCount : 0;
+					currentSimpleBatchCount += typeof details?.simpleBatchCount === "number" ? details.simpleBatchCount : 0;
+					currentRecursiveQueryCount += typeof details?.recursiveQueryCount === "number" ? details.recursiveQueryCount : 0;
+					currentRecursiveBatchCount += typeof details?.recursiveBatchCount === "number" ? details.recursiveBatchCount : 0;
+					currentSubmodelOverrideCount += typeof details?.submodelOverrideCount === "number" ? details.submodelOverrideCount : 0;
+					currentShowVarsCount += typeof details?.showVarsCount === "number" ? details.showVarsCount : 0;
+					currentFinalAliasUsed = currentFinalAliasUsed || details?.finalAliasUsed === true;
+					currentFinalVarAliasUsed = currentFinalVarAliasUsed || details?.finalVarAliasUsed === true;
+					currentSubmodelOverrides.push(...extractSubmodelOverrides(details?.submodelOverrides));
 				}
 			}
 			if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
@@ -296,20 +397,29 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 		let previousMessageCount = session.messages.length;
 		let spyCursor = 0;
 
-		for (const setupPrompt of options.scenario.setupPrompts ?? []) {
+		for (const setupPrompt of scenario.setupPrompts ?? []) {
 			await session.prompt(setupPrompt);
 			previousMessageCount = session.messages.length;
 			spyCursor = (await readSpyEvents(spyLogPath)).length;
 		}
 
-		for (let turnIndex = 0; turnIndex < options.scenario.turns.length; turnIndex += 1) {
-			const turn = options.scenario.turns[turnIndex];
+		for (let turnIndex = 0; turnIndex < scenario.turns.length; turnIndex += 1) {
+			const turn = scenario.turns[turnIndex];
 			currentTools = [];
 			currentReadPaths = [];
 			currentAssistantDeltas = "";
 			currentRlmExecCount = 0;
 			currentChildQueryCount = 0;
 			currentChildTurns = 0;
+			currentSimpleQueryCount = 0;
+			currentSimpleBatchCount = 0;
+			currentRecursiveQueryCount = 0;
+			currentRecursiveBatchCount = 0;
+			currentSubmodelOverrideCount = 0;
+			currentSubmodelOverrides = [];
+			currentShowVarsCount = 0;
+			currentFinalAliasUsed = false;
+			currentFinalVarAliasUsed = false;
 			currentAssistantUsage = emptyUsage();
 			currentAssistantStopReason = undefined;
 			currentAssistantErrorMessage = undefined;
@@ -324,6 +434,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			const requests = spyEventsToRequests(newSpyEvents, turnIndex, turn.id);
 			const contextSamples = spyEventsToContextSamples(newSpyEvents);
 			const contextStats = summarizeContextSamples(contextSamples);
+			const workspaceStats = spyEventsToWorkspaceStats(newSpyEvents);
 			const newMessages = session.messages.slice(previousMessageCount);
 			previousMessageCount = session.messages.length;
 			const assistantText = extractAssistantText(newMessages, currentAssistantDeltas);
@@ -334,6 +445,10 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 				? longestCommonPrefixChars(previousFirstCanonical, firstRequestCanonical)
 				: undefined;
 			const repeatedReadPaths = findRepeated(currentReadPaths);
+			const repeatedReadRatio = computeRepeatedReadRatio(currentReadPaths);
+			const leafToolCount = currentTools.filter((tool) => tool.phase === "start" && !isRlmInternalTool(tool.toolName)).length;
+			const commitTruthfulness = analyzeCommitTruthfulness(assistantText, workspaceStats.commitCount);
+			const pathCitations = analyzeAssistantPathCitations(assistantText, getRepoRoot());
 			turns.push({
 				turnIndex,
 				turnId: turn.id,
@@ -349,9 +464,37 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 				tools: currentTools,
 				readPaths: currentReadPaths,
 				repeatedReadPaths,
+				...(repeatedReadRatio !== undefined ? { repeatedReadRatio } : {}),
+				leafToolCount,
 				rlmExecCount: currentRlmExecCount,
 				childQueryCount: currentChildQueryCount,
 				childTurns: currentChildTurns,
+				attemptedSimpleQueryCount: sumRlmExecNumber(currentTools, "attemptedSimpleQueryCount"),
+				attemptedSimpleBatchCount: sumRlmExecNumber(currentTools, "attemptedSimpleBatchCount"),
+				attemptedRecursiveQueryCount: sumRlmExecNumber(currentTools, "attemptedRecursiveQueryCount"),
+				attemptedRecursiveBatchCount: sumRlmExecNumber(currentTools, "attemptedRecursiveBatchCount"),
+				simpleQueryCount: currentSimpleQueryCount,
+				simpleBatchCount: currentSimpleBatchCount,
+				recursiveQueryCount: currentRecursiveQueryCount,
+				recursiveBatchCount: currentRecursiveBatchCount,
+				submodelOverrideCount: currentSubmodelOverrideCount,
+				submodelOverrides: dedupeSubmodelOverrides(currentSubmodelOverrides),
+				showVarsCount: currentShowVarsCount,
+				finalAliasUsed: currentFinalAliasUsed,
+				finalVarAliasUsed: currentFinalVarAliasUsed,
+				commitCount: workspaceStats.commitCount,
+				workspaceCommits: workspaceStats.workspaceCommits,
+				committedAfterLeafTools: workspaceStats.committedAfterLeafTools,
+				committedBeforeLeafTools: workspaceStats.committedBeforeLeafTools,
+				commitTruthfulness,
+				pathCitations,
+				workspaceState: workspaceStats.workspaceState,
+				workspacePendingConsolidation: workspaceStats.workspaceState?.pendingConsolidation,
+				workspaceHasCommitted: workspaceStats.workspaceState?.hasCommitted,
+				runtimeBindingCountBefore: sumRlmExecNumber(currentTools, "runtimeBindingCountBefore"),
+				runtimeBindingCountAfter: sumRlmExecNumber(currentTools, "runtimeBindingCountAfter"),
+				runtimeNewBindingCount: sumRlmExecNumber(currentTools, "runtimeNewBindingCount"),
+				runtimeUpdatedBindingCount: sumRlmExecNumber(currentTools, "runtimeUpdatedBindingCount"),
 				firstRequestCanonical,
 				context: contextStats,
 				...(sharedPrefix !== undefined
@@ -376,6 +519,38 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			totalRlmExecCount: turns.reduce((sum, turn) => sum + turn.rlmExecCount, 0),
 			totalChildQueryCount: turns.reduce((sum, turn) => sum + turn.childQueryCount, 0),
 			totalChildTurns: turns.reduce((sum, turn) => sum + turn.childTurns, 0),
+			totalAttemptedSimpleQueryCount: turns.reduce((sum, turn) => sum + turn.attemptedSimpleQueryCount, 0),
+			totalAttemptedSimpleBatchCount: turns.reduce((sum, turn) => sum + turn.attemptedSimpleBatchCount, 0),
+			totalAttemptedRecursiveQueryCount: turns.reduce((sum, turn) => sum + turn.attemptedRecursiveQueryCount, 0),
+			totalAttemptedRecursiveBatchCount: turns.reduce((sum, turn) => sum + turn.attemptedRecursiveBatchCount, 0),
+			totalSimpleQueryCount: turns.reduce((sum, turn) => sum + turn.simpleQueryCount, 0),
+			totalSimpleBatchCount: turns.reduce((sum, turn) => sum + turn.simpleBatchCount, 0),
+			totalRecursiveQueryCount: turns.reduce((sum, turn) => sum + turn.recursiveQueryCount, 0),
+			totalRecursiveBatchCount: turns.reduce((sum, turn) => sum + turn.recursiveBatchCount, 0),
+			totalSubmodelOverrideCount: turns.reduce((sum, turn) => sum + turn.submodelOverrideCount, 0),
+			totalShowVarsCount: turns.reduce((sum, turn) => sum + turn.showVarsCount, 0),
+			turnsUsingFinalAlias: turns.filter((turn) => turn.finalAliasUsed).length,
+			turnsUsingFinalVarAlias: turns.filter((turn) => turn.finalVarAliasUsed).length,
+			totalWorkspaceCommits: turns.reduce((sum, turn) => sum + turn.commitCount, 0),
+			turnsWithLeafTools: turns.filter((turn) => turn.leafToolCount > 0).length,
+			turnsWithCommitAfterLeafTools: turns.filter((turn) => turn.leafToolCount > 0 && turn.committedAfterLeafTools).length,
+			postLeafCommitRate: computePostLeafCommitRate(turns),
+			claimedCommitTurns: turns.filter((turn) => turn.commitTruthfulness.claimedCommit).length,
+			falseCommitClaimTurns: turns.filter((turn) => turn.commitTruthfulness.falseClaim).length,
+			totalPathCitations: turns.reduce((sum, turn) => sum + turn.pathCitations.length, 0),
+			existingPathCitations: turns.reduce((sum, turn) => sum + turn.pathCitations.filter((citation) => citation.exists).length, 0),
+			missingPathCitations: turns.reduce((sum, turn) => sum + turn.pathCitations.filter((citation) => !citation.exists).length, 0),
+			pathExistenceRate: computePathExistenceRate(turns),
+			totalRuntimeNewBindingCount: turns.reduce((sum, turn) => sum + (turn.runtimeNewBindingCount ?? 0), 0),
+			totalRuntimeUpdatedBindingCount: turns.reduce((sum, turn) => sum + (turn.runtimeUpdatedBindingCount ?? 0), 0),
+			totalReadPaths: turns.reduce((sum, turn) => sum + turn.readPaths.length, 0),
+			totalRepeatedReadPaths: turns.reduce((sum, turn) => sum + turn.repeatedReadPaths.length, 0),
+			repeatedReadRatio: computeAggregateRepeatedReadRatio(turns),
+			turnsEndingPendingConsolidation: turns.filter((turn) => turn.workspacePendingConsolidation === true).length,
+			staleRecoveryOpportunities: countStaleRecoveryOpportunities(turns),
+			staleRecoveries: countStaleRecoveries(turns),
+			staleRecoveryRate: computeStaleRecoveryRate(turns),
+			plateauRatio: computePlateauRatio(turns),
 			context: summarizeContextAcrossTurns(turns),
 		};
 
@@ -384,7 +559,7 @@ async function runNativeScenario(options: NativeRunOptions): Promise<EvalRunResu
 			harnessVersion: 1,
 			piVersion: getPinnedPiVersion(),
 			repoRoot: getRepoRoot(),
-			scenario: options.scenario,
+			scenario,
 			subject: { label: options.subjectLabel, entrypoint: resolvedSubjectEntrypoint },
 			model: {
 				provider: selectedModel.provider,
@@ -512,6 +687,115 @@ function spyEventsToContextSamples(events: SpyEvent[]): SpyContextSample[] {
 		});
 }
 
+function isRlmInternalTool(toolName: string): boolean {
+	return toolName === "rlm_exec" || toolName === "rlm_inspect" || toolName === "rlm_reset";
+}
+
+function spyEventsToWorkspaceStats(events: SpyEvent[]): TurnWorkspaceStats {
+	let lastLeafToolIndex = -1;
+	let firstLeafToolIndex = -1;
+	let commitCount = 0;
+	let committedAfterLeafTools = false;
+	let committedBeforeLeafTools = false;
+	let workspaceState: EvalTurnResult["workspaceState"] | undefined;
+	const workspaceCommits: EvalTurnResult["workspaceCommits"] = [];
+
+	for (let index = 0; index < events.length; index += 1) {
+		const event = events[index];
+		if (event.type === "tool_execution_end") {
+			const data = isRecord(event.data) ? event.data : {};
+			const toolName = typeof data.toolName === "string" ? data.toolName : "";
+			if (toolName && !isRlmInternalTool(toolName)) {
+				lastLeafToolIndex = index;
+				if (firstLeafToolIndex === -1) firstLeafToolIndex = index;
+			}
+			continue;
+		}
+		if (event.type === "workspace_commit") {
+			const data = isRecord(event.data) ? event.data : {};
+			const commit = {
+				changedKeys: Array.isArray(data.changedKeys) ? data.changedKeys.filter((item): item is string => typeof item === "string") : [],
+				ignoredKeys: Array.isArray(data.ignoredKeys) ? data.ignoredKeys.filter((item): item is string => typeof item === "string") : [],
+				planLength: optionalNumber(data.planLength) ?? 0,
+				findingCount: optionalNumber(data.findingCount) ?? 0,
+				pendingConsolidation: data.pendingConsolidation === true,
+				activeContextSummaryPresent: data.activeContextSummaryPresent === true,
+			};
+			workspaceCommits.push(commit);
+			commitCount += 1;
+			if (lastLeafToolIndex !== -1 && index > lastLeafToolIndex) committedAfterLeafTools = true;
+			if (firstLeafToolIndex === -1 || index < firstLeafToolIndex) committedBeforeLeafTools = true;
+			continue;
+		}
+		if (event.type === "workspace_state") {
+			const data = isRecord(event.data) ? event.data : {};
+			workspaceState = {
+				hasCommitted: data.hasCommitted === true,
+				pendingConsolidation: data.pendingConsolidation === true,
+				lastCommittedTurn: optionalNumber(data.lastCommittedTurn),
+				lastLeafToolTurn: optionalNumber(data.lastLeafToolTurn),
+				lastCommitChangedKeys: Array.isArray(data.lastCommitChangedKeys)
+					? data.lastCommitChangedKeys.filter((item): item is string => typeof item === "string")
+					: undefined,
+				planLength: optionalNumber(data.planLength) ?? 0,
+				findingCount: optionalNumber(data.findingCount) ?? 0,
+				artifactCount: optionalNumber(data.artifactCount) ?? 0,
+				activeContextSummary: typeof data.activeContextSummary === "string" ? data.activeContextSummary : undefined,
+			};
+		}
+	}
+
+	return {
+		commitCount,
+		workspaceCommits,
+		committedAfterLeafTools,
+		committedBeforeLeafTools,
+		workspaceState,
+	};
+}
+
+function sumRlmExecNumber(tools: EvalToolEvent[], key: string): number {
+	return tools.reduce((sum, tool) => {
+		if (tool.phase !== "end" || tool.toolName !== "rlm_exec") return sum;
+		const details = isRecord((tool.result as { details?: unknown } | undefined)?.details)
+			? ((tool.result as { details?: Record<string, unknown> }).details as Record<string, unknown>)
+			: undefined;
+		const value = details && typeof details[key] === "number" && Number.isFinite(details[key]) ? (details[key] as number) : 0;
+		return sum + value;
+	}, 0);
+}
+
+function extractSubmodelOverrides(value: unknown): EvalSubmodelOverride[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap((item) => {
+		if (!isRecord(item)) return [];
+		const kind = item.kind === "simple" || item.kind === "recursive" ? item.kind : undefined;
+		const requested = typeof item.requested === "string" ? item.requested : undefined;
+		const resolvedProvider = typeof item.resolvedProvider === "string" ? item.resolvedProvider : undefined;
+		const resolvedId = typeof item.resolvedId === "string" ? item.resolvedId : undefined;
+		if (!kind || !requested || !resolvedProvider || !resolvedId) return [];
+		return [{
+			kind,
+			requested,
+			resolvedProvider,
+			resolvedId,
+			...(typeof item.thinkingLevel === "string" ? { thinkingLevel: item.thinkingLevel } : {}),
+		}];
+	});
+}
+
+function dedupeSubmodelOverrides(overrides: EvalSubmodelOverride[]): EvalSubmodelOverride[] {
+	const seen = new Set<string>();
+	const next: EvalSubmodelOverride[] = [];
+	for (const override of overrides) {
+		const key = `${override.kind}:${override.requested}:${override.resolvedProvider}:${override.resolvedId}:${override.thinkingLevel ?? ""}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		next.push(override);
+	}
+	return next;
+}
+
 function summarizeContextSamples(samples: SpyContextSample[]): EvalContextStats | undefined {
 	if (samples.length === 0) return undefined;
 	const messageCounts = samples.map((sample) => sample.messageCount).filter(isFiniteNumber);
@@ -536,6 +820,63 @@ function summarizeContextAcrossTurns(turns: EvalTurnResult[]): EvalRunResult["su
 		lastMessageCount: last?.lastMessageCount ?? last?.maxMessageCount,
 		lastEstimatedChars: last?.lastEstimatedChars ?? last?.maxEstimatedChars,
 	};
+}
+
+function computePostLeafCommitRate(turns: EvalTurnResult[]): number | undefined {
+	const eligible = turns.filter((turn) => turn.leafToolCount > 0);
+	if (eligible.length === 0) return undefined;
+	return eligible.filter((turn) => turn.committedAfterLeafTools).length / eligible.length;
+}
+
+function computePathExistenceRate(turns: EvalTurnResult[]): number | undefined {
+	const citations = turns.flatMap((turn) => turn.pathCitations);
+	if (citations.length === 0) return undefined;
+	return citations.filter((citation) => citation.exists).length / citations.length;
+}
+
+function computeAggregateRepeatedReadRatio(turns: EvalTurnResult[]): number | undefined {
+	const totalReadPaths = turns.reduce((sum, turn) => sum + turn.readPaths.length, 0);
+	if (totalReadPaths === 0) return undefined;
+	const repeatedReads = turns.reduce((sum, turn) => {
+		const ratio = turn.repeatedReadRatio;
+		if (ratio === undefined) return sum;
+		return sum + (ratio * turn.readPaths.length);
+	}, 0);
+	return repeatedReads / totalReadPaths;
+}
+
+function countStaleRecoveryOpportunities(turns: EvalTurnResult[]): number {
+	let opportunities = 0;
+	for (let i = 0; i < turns.length - 1; i += 1) {
+		if (turns[i].workspacePendingConsolidation === true) opportunities += 1;
+	}
+	return opportunities;
+}
+
+function countStaleRecoveries(turns: EvalTurnResult[]): number {
+	let recoveries = 0;
+	for (let i = 0; i < turns.length - 1; i += 1) {
+		if (turns[i].workspacePendingConsolidation !== true) continue;
+		const nextTurn = turns[i + 1];
+		if (nextTurn.commitCount > 0 && nextTurn.committedBeforeLeafTools) recoveries += 1;
+	}
+	return recoveries;
+}
+
+function computeStaleRecoveryRate(turns: EvalTurnResult[]): number | undefined {
+	const opportunities = countStaleRecoveryOpportunities(turns);
+	if (opportunities === 0) return undefined;
+	return countStaleRecoveries(turns) / opportunities;
+}
+
+function computePlateauRatio(turns: EvalTurnResult[]): number | undefined {
+	if (turns.length < 10) return undefined;
+	const lateTurns = turns.slice(10, 20);
+	const midTurns = turns.slice(4, 10);
+	const lateMax = maxOf(lateTurns.map((turn) => turn.context?.maxEstimatedChars));
+	const midMax = maxOf(midTurns.map((turn) => turn.context?.maxEstimatedChars));
+	if (!lateMax || !midMax) return undefined;
+	return lateMax / midMax;
 }
 
 function usageFromAssistantMessage(message: unknown): ProxyUsage {
@@ -686,7 +1027,26 @@ function renderRunSummary(result: EvalRunResult, out: { baseDir: string; jsonPat
 		`- Tool calls: ${result.summary.totalToolCalls}`,
 		`- rlm_exec count: ${result.summary.totalRlmExecCount}`,
 		`- Child queries/turns: ${result.summary.totalChildQueryCount}/${result.summary.totalChildTurns}`,
+		`- Attempted simple queries/batches: ${result.summary.totalAttemptedSimpleQueryCount}/${result.summary.totalAttemptedSimpleBatchCount}`,
+		`- Attempted recursive queries/batches: ${result.summary.totalAttemptedRecursiveQueryCount}/${result.summary.totalAttemptedRecursiveBatchCount}`,
+		`- Executed simple queries/batches: ${result.summary.totalSimpleQueryCount}/${result.summary.totalSimpleBatchCount}`,
+		`- Executed recursive queries/batches: ${result.summary.totalRecursiveQueryCount}/${result.summary.totalRecursiveBatchCount}`,
+		`- Submodel overrides: ${result.summary.totalSubmodelOverrideCount}`,
+		`- SHOW_VARS count: ${result.summary.totalShowVarsCount}`,
+		`- FINAL / FINAL_VAR turns: ${result.summary.turnsUsingFinalAlias} / ${result.summary.turnsUsingFinalVarAlias}`,
+		`- Workspace commits: ${result.summary.totalWorkspaceCommits}`,
+		`- Claimed commit turns: ${result.summary.claimedCommitTurns}`,
+		`- False commit-claim turns: ${result.summary.falseCommitClaimTurns}`,
+		`- Path citations: ${result.summary.totalPathCitations}`,
+		`- Missing path citations: ${result.summary.missingPathCitations}`,
+		`- Runtime new bindings: ${result.summary.totalRuntimeNewBindingCount}`,
+		`- Runtime updated bindings: ${result.summary.totalRuntimeUpdatedBindingCount}`,
 	];
+	if (result.summary.pathExistenceRate !== undefined) lines.push(`- Path existence rate: ${(100 * result.summary.pathExistenceRate).toFixed(1)}%`);
+	if (result.summary.repeatedReadRatio !== undefined) lines.push(`- Repeated read ratio: ${(100 * result.summary.repeatedReadRatio).toFixed(1)}%`);
+	if (result.summary.postLeafCommitRate !== undefined) lines.push(`- Post-leaf commit rate: ${(100 * result.summary.postLeafCommitRate).toFixed(1)}%`);
+	if (result.summary.staleRecoveryRate !== undefined) lines.push(`- Stale recovery rate: ${(100 * result.summary.staleRecoveryRate).toFixed(1)}%`);
+	if (result.summary.plateauRatio !== undefined) lines.push(`- Plateau ratio: ${result.summary.plateauRatio.toFixed(2)}`);
 	if (result.summary.context) {
 		lines.push(
 			`- Context (max): messages ${formatMaybeNumber(result.summary.context.maxMessageCount)}, est chars ${formatMaybeNumber(result.summary.context.maxEstimatedChars)}`,
@@ -709,12 +1069,32 @@ function renderRunSummary(result: EvalRunResult, out: { baseDir: string; jsonPat
 		if (turn.firstRequestCanonical) {
 			lines.push(`- First request canonical: ${turn.firstRequestCanonical.length} chars, hash ${shortHash(turn.firstRequestCanonical)}`);
 		}
-		lines.push(`- Tools: ${turn.tools.filter((tool) => tool.phase === "start").length}, rlm_exec ${turn.rlmExecCount}, child ${turn.childQueryCount}/${turn.childTurns}`);
+		lines.push(`- Tools: ${turn.tools.filter((tool) => tool.phase === "start").length}, leaf ${turn.leafToolCount}, rlm_exec ${turn.rlmExecCount}, child ${turn.childQueryCount}/${turn.childTurns}, simple attempted/executed ${turn.attemptedSimpleQueryCount}/${turn.simpleQueryCount}, simple batches attempted/executed ${turn.attemptedSimpleBatchCount}/${turn.simpleBatchCount}, recursive attempted/executed ${turn.attemptedRecursiveQueryCount}/${turn.recursiveQueryCount}, recursive batches attempted/executed ${turn.attemptedRecursiveBatchCount}/${turn.recursiveBatchCount}, commits ${turn.commitCount}`);
+		if (turn.submodelOverrideCount > 0) {
+			lines.push(`- Submodel overrides: ${turn.submodelOverrides.map((override) => `${override.kind}:${override.requested}->${override.resolvedProvider}/${override.resolvedId}${override.thinkingLevel ? `:${override.thinkingLevel}` : ""}`).join(", ")}`);
+		}
+		if (turn.showVarsCount > 0 || turn.finalAliasUsed || turn.finalVarAliasUsed) {
+			lines.push(`- Runtime helper usage: SHOW_VARS ${turn.showVarsCount}, FINAL ${turn.finalAliasUsed ? "yes" : "no"}, FINAL_VAR ${turn.finalVarAliasUsed ? "yes" : "no"}`);
+		}
+		if (turn.leafToolCount > 0) lines.push(`- Post-leaf commit: ${turn.committedAfterLeafTools ? "yes" : "no"}`);
+		if (turn.commitTruthfulness.claimedCommit) {
+			lines.push(`- Commit claim: claimed=yes actual=${turn.commitTruthfulness.actualCommit ? "yes" : "no"}${turn.commitTruthfulness.falseClaim ? " (false claim)" : ""}`);
+		}
+		if (turn.pathCitations.length > 0) {
+			const missing = turn.pathCitations.filter((citation) => !citation.exists).map((citation) => citation.cited);
+			lines.push(`- Path citations: ${turn.pathCitations.length} total, ${missing.length} missing`);
+			if (missing.length > 0) lines.push(`- Missing cited paths: ${missing.join(", ")}`);
+		}
+		if (turn.workspaceState) lines.push(`- Workspace: committed=${turn.workspaceState.hasCommitted} pending=${turn.workspaceState.pendingConsolidation} plan=${turn.workspaceState.planLength} findings=${turn.workspaceState.findingCount} artifacts=${turn.workspaceState.artifactCount}`);
+		if (turn.runtimeBindingCountBefore !== undefined || turn.runtimeBindingCountAfter !== undefined) {
+			lines.push(`- Runtime bindings: before ${formatMaybeNumber(turn.runtimeBindingCountBefore)}, after ${formatMaybeNumber(turn.runtimeBindingCountAfter)}, new ${formatMaybeNumber(turn.runtimeNewBindingCount)}, updated ${formatMaybeNumber(turn.runtimeUpdatedBindingCount)}`);
+		}
 		if (turn.assistantStopReason) lines.push(`- Assistant stop reason: ${turn.assistantStopReason}`);
 		if (turn.assistantErrorMessage) lines.push(`- Assistant error: ${turn.assistantErrorMessage}`);
 		if (turn.firstRequestSharedPrefixCharsVsPreviousTurn !== undefined) {
 			lines.push(`- First request shared prefix vs previous turn: ${turn.firstRequestSharedPrefixCharsVsPreviousTurn} chars (${(100 * (turn.firstRequestSharedPrefixRatioVsPreviousTurn ?? 0)).toFixed(1)}%)`);
 		}
+		if (turn.repeatedReadRatio !== undefined) lines.push(`- Repeated read ratio: ${(100 * turn.repeatedReadRatio).toFixed(1)}%`);
 		if (turn.repeatedReadPaths.length > 0) lines.push(`- Repeated read paths: ${turn.repeatedReadPaths.join(", ")}`);
 		lines.push("- Assistant output preview:");
 		lines.push("```text");
@@ -752,6 +1132,26 @@ function renderCompareSummary(result: EvalCompareResult, out: { baseDir: string;
 		`- rlm_exec count: ${signed(result.delta.rlmExecCount)}`,
 		`- Child queries: ${signed(result.delta.childQueryCount)}`,
 		`- Child turns: ${signed(result.delta.childTurns)}`,
+		`- Attempted simple queries: ${signed(result.delta.attemptedSimpleQueryCount)}`,
+		`- Attempted simple batches: ${signed(result.delta.attemptedSimpleBatchCount)}`,
+		`- Attempted recursive queries: ${signed(result.delta.attemptedRecursiveQueryCount)}`,
+		`- Attempted recursive batches: ${signed(result.delta.attemptedRecursiveBatchCount)}`,
+		`- Simple queries: ${signed(result.delta.simpleQueryCount)}`,
+		`- Simple batches: ${signed(result.delta.simpleBatchCount)}`,
+		`- Recursive queries: ${signed(result.delta.recursiveQueryCount)}`,
+		`- Recursive batches: ${signed(result.delta.recursiveBatchCount)}`,
+		`- Submodel overrides: ${signed(result.delta.submodelOverrideCount)}`,
+		`- SHOW_VARS count: ${signed(result.delta.showVarsCount)}`,
+		`- Workspace commits: ${signed(result.delta.workspaceCommits)}`,
+		`- False commit-claim turns: ${signed(result.delta.falseCommitClaimTurns)}`,
+		`- Missing path citations: ${signed(result.delta.missingPathCitations)}`,
+		`- Path existence rate: ${signed(result.delta.pathExistenceRate * 100)} pp`,
+		`- Runtime new bindings: ${signed(result.delta.runtimeNewBindingCount)}`,
+		`- Runtime updated bindings: ${signed(result.delta.runtimeUpdatedBindingCount)}`,
+		`- Repeated read ratio: ${signed(result.delta.repeatedReadRatio * 100)} pp`,
+		`- Post-leaf commit rate: ${signed(result.delta.postLeafCommitRate * 100)} pp`,
+		`- Stale recovery rate: ${signed(result.delta.staleRecoveryRate * 100)} pp`,
+		`- Plateau ratio: ${signed(result.delta.plateauRatio)}`,
 		"",
 		"## Prefix drift evidence",
 		"",
@@ -868,6 +1268,62 @@ function booleanArg(args: CliArgs, key: string): boolean | undefined {
 	return undefined;
 }
 
+function parseExtensionFlagValue(value: string): string | boolean {
+	if (["true", "1", "yes"].includes(value)) return true;
+	if (["false", "0", "no"].includes(value)) return false;
+	return value;
+}
+
+function parseExtensionFlagsArg(value: string | undefined): Record<string, string | boolean> {
+	if (!value) return {};
+	const pairs = value
+		.split(",")
+		.map((item) => item.trim())
+		.filter(Boolean);
+	const flags: Record<string, string | boolean> = {};
+	for (const pair of pairs) {
+		const eq = pair.indexOf("=");
+		if (eq === -1) {
+			flags[pair] = true;
+			continue;
+		}
+		const key = pair.slice(0, eq).trim();
+		const rawValue = pair.slice(eq + 1).trim();
+		if (!key) continue;
+		flags[key] = parseExtensionFlagValue(rawValue);
+	}
+	return flags;
+}
+
+function rewriteRuntimeSurfacePromptForNoSubcalls(prompt: string): string {
+	const marker = "\nStart in rlm_exec.";
+	const index = prompt.indexOf(marker);
+	if (index === -1) return prompt;
+	const prefix = prompt.slice(0, index);
+	return `${prefix}\nStart in rlm_exec in no-subcalls mode. Inspect globalThis.context and any needed runtime views, run leaf tool actions directly, keep durable findings in globalThis.workspace via workspace.commit({...}), and finalize from runtime state. Avoid child-query helpers (llm_query, rlm_query, llm_query_batched, rlm_query_batched).`;
+}
+
+function withScenarioExtensionFlags(
+	scenario: EvalScenario,
+	overrides: Record<string, string | boolean>,
+): EvalScenario {
+	if (Object.keys(overrides).length === 0) return scenario;
+	const isRuntimeSurfaceNoSubcalls =
+		overrides["rlm-externalization-kernel"] === "no-subcalls" && scenario.id === "paper-runtime-surface";
+	const turns =
+		isRuntimeSurfaceNoSubcalls ?
+			scenario.turns.map((turn) => (turn.id === "runtime-surface" ? { ...turn, prompt: rewriteRuntimeSurfacePromptForNoSubcalls(turn.prompt) } : turn))
+			: scenario.turns;
+	return {
+		...scenario,
+		turns,
+		extensionFlags: {
+			...(scenario.extensionFlags ?? {}),
+			...overrides,
+		},
+	};
+}
+
 function printScenarios() {
 	console.log("Scenarios:");
 	for (const scenario of getEvalScenarios()) console.log(`${scenario.id}\t${scenario.label}`);
@@ -883,14 +1339,17 @@ function printHelp() {
   npm run eval:baseline -- --name main
 
 Native-mode options:
-  --spy-entrypoint   Path to the pi-spy extension entrypoint (required for run/compare)
-  --model-id         Model id to resolve from your normal Pi setup (required)
-  --model-provider   Exact provider to use for model resolution
-  --auth-provider    Preferred provider/auth namespace (e.g. openai-codex)
-  --agent-dir        Override the Pi agent dir used for auth/models
-  --isolated-auth    Use isolated auth/models dir instead of shared Pi auth
-  --api-key          Runtime API key value for the resolved provider
-  --reasoning        true/false hint only; actual provider model capabilities still come from Pi
+  --spy-entrypoint              Path to the pi-spy extension entrypoint (required for run/compare)
+  --model-id                    Model id to resolve from your normal Pi setup (required)
+  --model-provider              Exact provider to use for model resolution
+  --auth-provider               Preferred provider/auth namespace (e.g. openai-codex)
+  --agent-dir                   Override the Pi agent dir used for auth/models
+  --isolated-auth               Use isolated auth/models dir instead of shared Pi auth
+  --api-key                     Runtime API key value for the resolved provider
+  --reasoning                   true/false hint only; actual provider model capabilities still come from Pi
+  --extension-flags             Comma-separated flags for both sides, e.g. rlm-enabled=true,rlm-externalization-kernel=no-subcalls
+  --baseline-extension-flags    Compare-only overrides for the baseline side
+  --candidate-extension-flags   Compare-only overrides for the candidate side
 
 Notes:
   This runner now defaults to Pi-native observation using pi-spy.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildForcedFinalizePrompt } from "../src/recursion.js";
+import { buildForcedFinalizePrompt, parseModelSelector, selectRequestedChildModel } from "../src/recursion.js";
 
 function makeArtifact() {
 	return {
@@ -43,7 +43,7 @@ function makeArtifact() {
 }
 
 describe("buildForcedFinalizePrompt", () => {
-	it("keeps runtime pointers before the original task and uses the restored working set", () => {
+	it("builds a focused finalize prompt from restored state", () => {
 		const prompt = buildForcedFinalizePrompt({
 			prompt: "Review the child output",
 			artifact: makeArtifact() as any,
@@ -52,15 +52,44 @@ describe("buildForcedFinalizePrompt", () => {
 		});
 
 		expect(prompt).toContain("You are a recursive RLM child node resuming from previously gathered child state.");
-		expect(prompt).toContain("Inspect globalThis.workspace.activeContext first.");
-		expect(prompt).toContain("Restored working set:");
-		expect(prompt).toContain("Goal: refactor");
-		expect(prompt).toContain("Current child summary:");
+		expect(prompt).toContain("Runtime state access:");
+		expect(prompt).toContain("Task snapshot: globalThis.context");
 		expect(prompt).toContain("Restored state keys: files, findings");
 		expect(prompt).toContain("Return valid JSON only");
 		expect(prompt).toContain('"summary": "string"');
 		expect(prompt).toContain("Original task:\nReview the child output");
-		expect(prompt.indexOf("Restored working set:")).toBeLessThan(prompt.indexOf("Original task:\nReview the child output"));
-		expect(prompt.indexOf("Current child summary:")).toBeLessThan(prompt.indexOf("Original task:\nReview the child output"));
+		expect(prompt).not.toContain("Examples:");
+	});
+});
+
+describe("selectRequestedChildModel", () => {
+	it("uses dedicated defaults for each child query mode", () => {
+		expect(selectRequestedChildModel(undefined, "simple", "openai-codex/gpt-5.4-nano:off")).toBe("openai-codex/gpt-5.4-nano:off");
+		expect(selectRequestedChildModel(undefined, "recursive", "openai-codex/gpt-5.4-nano:off", "openai-codex/gpt-5.4-mini:off")).toBe(
+			"openai-codex/gpt-5.4-mini:off",
+		);
+		expect(selectRequestedChildModel("openai/gpt-5.4-mini", "simple", "openai/gpt-5.4-nano:off")).toBe("openai/gpt-5.4-mini");
+	});
+
+	it("keeps explicit per-call model override above profile defaults", () => {
+		expect(selectRequestedChildModel("openai-codex/gpt-5.4-mini", "simple", "openai-codex/gpt-5.4-nano:off")).toBe("openai-codex/gpt-5.4-mini");
+		expect(
+			selectRequestedChildModel("openai-codex/gpt-5.4-mini:off", "recursive", "openai-codex/gpt-5.4-nano:off", "openai-codex/gpt-5.4-class"),
+		).toBe("openai-codex/gpt-5.4-mini:off");
+	});
+});
+
+describe("parseModelSelector", () => {
+	it("parses an exact provider/id selector with thinking suffix", () => {
+		expect(parseModelSelector("openai/gpt-5-mini:off")).toEqual({
+			provider: "openai",
+			id: "gpt-5-mini",
+			thinkingLevel: "off",
+		});
+	});
+
+	it("rejects malformed selectors", () => {
+		expect(() => parseModelSelector("gpt-5-mini")).toThrow(/provider\/id/);
+		expect(() => parseModelSelector("openai/gpt-5-mini:turbo")).toThrow(/Unknown thinking level/);
 	});
 });

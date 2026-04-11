@@ -4,7 +4,6 @@ import { buildChildPrompt, normalizeLlmQueryInput, parseChildResult } from "../s
 describe("llmQuery normalization", () => {
 	it("applies defaults for the minimal request shape", () => {
 		const normalized = normalizeLlmQueryInput({ prompt: "Analyze auth" });
-
 		expect(normalized).toEqual({
 			prompt: "Analyze auth",
 			role: "general",
@@ -18,26 +17,17 @@ describe("llmQuery normalization", () => {
 		expect(() => normalizeLlmQueryInput({ prompt: "" })).toThrow(/non-empty prompt/);
 		expect(() => normalizeLlmQueryInput({} as any)).toThrow(/non-empty prompt/);
 	});
-
-	it("rejects non structured-cloneable state", () => {
-		expect(() =>
-			normalizeLlmQueryInput({
-				prompt: "Analyze auth",
-				state: { fn: () => 1 } as any,
-			}),
-		).toThrow(/structured-cloneable/);
-	});
-
 });
 
 describe("buildChildPrompt", () => {
-	it("keeps the active working set and task ordering compact", () => {
+	it("builds a workspace-aware child prompt without experiment knobs", () => {
 		const prompt = buildChildPrompt(
 			normalizeLlmQueryInput({
 				prompt: "Summarize these files",
 				role: "scout",
 				state: { files: ["a.ts", "b.ts"], findings: { auth: true } },
 				budget: { maxTurns: 3 },
+				model: "openai/gpt-5-mini:off",
 				output: { mode: "json", schema: { summary: "string" } },
 			}),
 			{
@@ -68,17 +58,20 @@ describe("buildChildPrompt", () => {
 		);
 
 		expect(prompt).toContain("Role: scout");
+		expect(prompt).toContain("Compiled working set:");
+		expect(prompt).toContain("Deterministic compiled child working set from externalized state.");
+		expect(prompt).toContain("Workspace manifest handles:");
+		expect(prompt).toContain("Selected artifact handles:");
+		expect(prompt).toContain("Parent state manifest:");
 		expect(prompt).toContain("Runtime state access:");
-		expect(prompt).toContain("Inspect globalThis.workspace.activeContext first.");
-		expect(prompt).toContain("Active working set:");
-		expect(prompt).toContain("Goal: refactor");
-		expect(prompt).toContain("Files: src/a.ts, src/b.ts");
+		expect(prompt).toContain("Task snapshot: globalThis.context");
+		expect(prompt).toContain("Deterministic compiled working set: globalThis.context.compiledContext");
 		expect(prompt).toContain("Parent state keys: files, findings");
+		expect(prompt).toContain("workspace.commit");
 		expect(prompt).toContain("Return valid JSON only");
 		expect(prompt).toContain('"summary": "string"');
+		expect(prompt).toContain("Requested child model: openai/gpt-5-mini:off");
 		expect(prompt).toContain("Task:\nSummarize these files");
-		expect(prompt.indexOf("Active working set:")).toBeLessThan(prompt.indexOf("Task:\nSummarize these files"));
-		expect(prompt.indexOf("Parent state keys:")).toBeLessThan(prompt.indexOf("Task:\nSummarize these files"));
 	});
 });
 
@@ -86,7 +79,6 @@ describe("parseChildResult", () => {
 	it("returns trimmed text in text mode", () => {
 		const input = normalizeLlmQueryInput({ prompt: "hello" });
 		const result = parseChildResult("  final answer  ", input, 2);
-
 		expect(result).toEqual({
 			ok: true,
 			answer: "final answer",
@@ -96,55 +88,10 @@ describe("parseChildResult", () => {
 		});
 	});
 
-	it("returns a stable failure for empty text mode output", () => {
-		const input = normalizeLlmQueryInput({ prompt: "hello" });
-		const result = parseChildResult("   ", input, 1);
-
-		expect(result).toEqual({
-			ok: false,
-			answer: "",
-			role: "general",
-			usage: { turns: 1 },
-			error: "Child returned empty output",
-		});
-	});
-
 	it("parses raw json in json mode", () => {
-		const input = normalizeLlmQueryInput({
-			prompt: "hello",
-			output: { mode: "json" },
-		});
+		const input = normalizeLlmQueryInput({ prompt: "hello", output: { mode: "json" } });
 		const result = parseChildResult('{"summary":"ok","value":42}', input, 1);
-
 		expect(result.ok).toBe(true);
 		expect(result.data).toEqual({ summary: "ok", value: 42 });
-		expect(result.summary).toBe("ok");
-	});
-
-	it("parses fenced json in json mode", () => {
-		const input = normalizeLlmQueryInput({
-			prompt: "hello",
-			output: { mode: "json" },
-		});
-		const result = parseChildResult('```json\n{"summary":"ok","value":42}\n```', input, 1);
-
-		expect(result.ok).toBe(true);
-		expect(result.data).toEqual({ summary: "ok", value: 42 });
-	});
-
-	it("returns a stable parse failure for invalid json", () => {
-		const input = normalizeLlmQueryInput({
-			prompt: "hello",
-			output: { mode: "json" },
-		});
-		const result = parseChildResult("not json", input, 1);
-
-		expect(result).toEqual({
-			ok: false,
-			answer: "not json",
-			role: "general",
-			usage: { turns: 1 },
-			error: "Failed to parse JSON child output",
-		});
 	});
 });

@@ -25,6 +25,18 @@ coverage/
 !/eval/artifacts/.gitkeep
 /eval/results/*
 !/eval/results/.gitkeep
+/eval/generated/*
 
 # IDE (optional local junk)
 .idea/
+
+# Local working notes / inventories
+/.local/
+
+#local config files
+.pi/agent/
+.DS_Store
+
+# planning files
+/local/papers/**
+/local/plans/**

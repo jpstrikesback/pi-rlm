@@ -18,7 +18,7 @@ import {
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { BUDGET_PRESETS, buildChildPrompt, normalizeLlmQueryInput, parseChildResult } from "./llm-query.js";
 import { buildChildArtifactFromBranch, composeRuntimeSnapshot, RLM_RUNTIME_TYPE, RLM_WORKSPACE_TYPE } from "./restore.js";
-import { buildWorkspacePointerHints, buildWorkspaceWorkingSetSummary, ensureWorkspaceShape, splitInternalLlmQueryContext } from "./workspace.js";
+import { buildCompiledPromptContext, renderCompiledPromptContext, buildWorkspacePointerHints, ensureWorkspaceShape, splitInternalLlmQueryContext } from "./workspace.js";
 import type {
 	LlmQueryRequest,
 	LlmQueryResult,
@@ -27,6 +27,10 @@ import type {
 	RlmBuiltInToolName,
 	RlmChildArtifact,
 	RlmChildProgressEvent,
+	RlmModelSelector,
+	RlmQueryMode,
+	RlmSubmodelOverride,
+	RlmThinkingLevel,
 	RlmWorkspace,
 	RuntimeSnapshot,
 } from "./types.js";
@@ -34,6 +38,7 @@ import type {
 const BUILT_IN_TOOL_NAMES: readonly RlmBuiltInToolName[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const READ_ONLY_TOOL_NAMES: RlmBuiltInToolName[] = ["read", "grep", "find", "ls"];
 const CODING_TOOL_NAMES: RlmBuiltInToolName[] = ["read", "bash", "edit", "write"];
+const SIMPLE_QUERY_MAX_TURNS = 1;
 
 type ChildArtifactBase = ReturnType<typeof buildChildArtifactFromBranch>;
 
@@ -50,6 +55,21 @@ type ChildSessionRun = {
 	turns: number;
 	abortedByBudget: boolean;
 };
+
+type ResolvedChildModel = {
+	model?: CreateAgentSessionOptions["model"];
+	thinkingLevel?: RlmThinkingLevel;
+	override?: RlmSubmodelOverride;
+};
+
+export function selectRequestedChildModel(
+	requested: RlmModelSelector | undefined,
+	queryMode: RlmQueryMode,
+	defaultSimpleModel?: RlmModelSelector,
+	defaultRecursiveModel?: RlmModelSelector,
+): RlmModelSelector | undefined {
+	return requested ?? (queryMode === "simple" ? defaultSimpleModel : defaultRecursiveModel);
+}
 
 function isBuiltInToolName(name: string): name is RlmBuiltInToolName {
 	return BUILT_IN_TOOL_NAMES.includes(name as RlmBuiltInToolName);
@@ -95,6 +115,35 @@ function buildBuiltInTools(cwd: string, names: RlmBuiltInToolName[]): AgentTool<
 }
 
 export { BUDGET_PRESETS, buildChildPrompt, normalizeLlmQueryInput, parseChildResult };
+
+export function parseModelSelector(selector: string): {
+	provider: string;
+	id: string;
+	thinkingLevel?: RlmThinkingLevel;
+} {
+	const trimmed = selector.trim();
+	if (!trimmed) throw new Error("Model selector must be a non-empty string");
+	const [modelPart, thinkingLevel, ...rest] = trimmed.split(":");
+	if (rest.length > 0) throw new Error(`Model selector must use provider/id[:thinking], got ${selector}`);
+	const slashIndex = modelPart.indexOf("/");
+	if (slashIndex <= 0 || slashIndex === modelPart.length - 1) {
+		throw new Error(`Model selector must use exact provider/id[:thinking], got ${selector}`);
+	}
+	const provider = modelPart.slice(0, slashIndex).trim();
+	const id = modelPart.slice(slashIndex + 1).trim();
+	if (!provider || !id) throw new Error(`Model selector must use exact provider/id[:thinking], got ${selector}`);
+	if (thinkingLevel !== undefined) {
+		const allowed = new Set<RlmThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh"]);
+		if (!allowed.has(thinkingLevel as RlmThinkingLevel)) {
+			throw new Error(`Unknown thinking level in model selector: ${thinkingLevel}`);
+		}
+	}
+	return {
+		provider,
+		id,
+		...(thinkingLevel ? { thinkingLevel: thinkingLevel as RlmThinkingLevel } : {}),
+	};
+}
 
 function createChildId(): string {
 	return `child-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -158,26 +207,32 @@ export function buildForcedFinalizePrompt(args: {
 }): string {
 	const sections: string[] = [];
 	const workingSetPointers = buildWorkspacePointerHints(args.artifact.workspace);
-	const workingSetSummary = buildWorkspaceWorkingSetSummary(args.artifact.workspace);
 	const stateKeys = buildStateKeyHint(args.artifact.state);
+	const compiled = buildCompiledPromptContext(args.artifact.workspace, {
+		prompt: args.prompt,
+		role: args.artifact.role,
+		parentState: args.artifact.state,
+		evidenceItemLimit: 4,
+		evidenceCheckpointLimit: 3,
+		artifactLimit: 4,
+		exactValueLimit: 2,
+	});
 	sections.push("You are a recursive RLM child node resuming from previously gathered child state.");
+	sections.push("Compiled working set:");
+	sections.push(renderCompiledPromptContext(compiled, {
+		title: "Deterministic compiled finalization working set from externalized state.",
+	}));
 	sections.push("Runtime state access:");
-	sections.push(workingSetPointers ?? "- Durable notebook: globalThis.workspace\n- Parent-provided local state: globalThis.parentState");
-	sections.push("- Input alias: globalThis.input");
-	if (workingSetSummary) {
-		sections.push(`Restored working set:\n${workingSetSummary}`);
-	}
-	if (stateKeys) {
-		sections.push(`Restored state keys: ${stateKeys}`);
-	}
-	if (args.artifact.summary) {
-		sections.push(`Current child summary:\n${args.artifact.summary}`);
-	}
+	sections.push(workingSetPointers ?? "- Task snapshot: globalThis.context\n- Deterministic compiled working set: globalThis.context.compiledContext\n- Inspect globalThis.workspace.activeContext first.\n- Durable notebook: globalThis.workspace\n- Recent history metadata only: globalThis.history\n- Parent-provided local state: globalThis.parentState\n- Input alias: globalThis.input");
+	if (stateKeys) sections.push(`Restored state keys: ${stateKeys}`);
 	sections.push("Rules:");
 	sections.push("- No tools are available in this finalization step.");
 	sections.push("- Use the restored runtime state and recorded child artifacts only.");
-	sections.push("- Inspect globalThis.workspace.activeContext first and use pointers instead of replaying transcript history.");
+	sections.push("- Treat globalThis.context.compiledContext as the primary prompt-visible working set.");
+	sections.push("- Inspect globalThis.context first, then globalThis.workspace.activeContext.");
+	sections.push("- Treat globalThis.history as minimal metadata only and prefer selected handles/artifact ids instead.");
 	sections.push("- If reusable findings already exist in runtime/workspace, preserve that structure and finalize from it.");
+	sections.push("- Use selected handles and artifact ids instead of restating earlier prose.");
 	sections.push("- Do not continue exploration or ask for more work.");
 	sections.push("- Return the best final answer now.");
 	if (args.outputMode === "json") {
@@ -194,17 +249,18 @@ export function buildForcedFinalizePrompt(args: {
 
 async function runChildSession(args: {
 	ctx: ExtensionContext;
-	extensionFactory: ExtensionFactory;
+	extensionFactory?: ExtensionFactory;
 	sessionManager: SessionManager;
 	tools: AgentTool<any>[];
 	prompt: string;
 	childId: string;
 	maxTurns: number;
+	modelConfig?: ResolvedChildModel;
 	onProgress?: (event: RlmChildProgressEvent) => void;
 }): Promise<ChildSessionRun> {
 	const loader = new DefaultResourceLoader({
 		cwd: args.ctx.cwd,
-		extensionFactories: [args.extensionFactory],
+		extensionFactories: args.extensionFactory ? [args.extensionFactory] : [],
 	});
 	await loader.reload();
 
@@ -214,7 +270,9 @@ async function runChildSession(args: {
 		resourceLoader: loader,
 		tools: args.tools,
 	};
-	if (args.ctx.model) createOptions.model = args.ctx.model;
+	if (args.modelConfig?.model) createOptions.model = args.modelConfig.model;
+	else if (args.ctx.model) createOptions.model = args.ctx.model;
+	if (args.modelConfig?.thinkingLevel) createOptions.thinkingLevel = args.modelConfig.thinkingLevel;
 
 	const { session } = await createAgentSession(createOptions);
 	let text = "";
@@ -266,6 +324,41 @@ async function runChildSession(args: {
 	}
 
 	return { text, turns, abortedByBudget };
+}
+
+async function resolveChildModel(
+	ctx: ExtensionContext,
+	requested: RlmModelSelector | undefined,
+	kind: RlmQueryMode,
+	parentThinkingLevel?: RlmThinkingLevel,
+): Promise<ResolvedChildModel> {
+	if (!requested) {
+		return {
+			...(ctx.model ? { model: ctx.model } : {}),
+			...(parentThinkingLevel ? { thinkingLevel: parentThinkingLevel } : {}),
+		};
+	}
+
+	const parsed = parseModelSelector(requested);
+	const model = ctx.modelRegistry.find(parsed.provider, parsed.id);
+	if (!model) {
+		throw new Error(`Could not resolve submodel ${requested}`);
+	}
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		throw new Error(`Submodel auth failed for ${requested}: ${auth.error}`);
+	}
+	return {
+		model,
+		thinkingLevel: parsed.thinkingLevel ?? parentThinkingLevel,
+		override: {
+			kind,
+			requested,
+			resolvedProvider: model.provider,
+			resolvedId: model.id,
+			...(parsed.thinkingLevel ?? parentThinkingLevel ? { thinkingLevel: parsed.thinkingLevel ?? parentThinkingLevel } : {}),
+		},
+	};
 }
 
 function buildChildArtifact(
@@ -327,15 +420,72 @@ export async function runChildQuery(
 		maxDepth: number;
 		extensionFactory: ExtensionFactory;
 		parentActiveTools: string[];
+		parentThinkingLevel?: RlmThinkingLevel;
+		defaultSimpleModel?: RlmModelSelector;
+		defaultRecursiveModel?: RlmModelSelector;
+		recursiveChildInheritParentByDefault?: boolean;
+		onMissingSimpleChildModel?: "fail" | "warn-and-inherit" | "warn-and-disable";
+		onMissingRecursiveChildModel?: "fail" | "warn-and-inherit" | "warn-and-disable";
+		simpleChildDisabled?: boolean;
+		recursiveChildDisabled?: boolean;
+		onResolvedModel?: (override: RlmSubmodelOverride) => void;
 		onProgress?: (event: RlmChildProgressEvent) => void;
 	},
 ): Promise<LlmQueryResult> {
-	const { publicInput, workspace: inputWorkspace } = splitInternalLlmQueryContext(input as unknown);
+	const { publicInput, workspace: inputWorkspace, queryMode } = splitInternalLlmQueryContext(input as unknown);
 	const normalized = normalizeLlmQueryInput(publicInput as LlmQueryRequest);
 	const parentWorkspace = inputWorkspace === undefined ? undefined : inputWorkspace === null ? null : ensureWorkspaceShape(inputWorkspace);
 	const maxDepth = normalized.budget.maxDepth ?? options.maxDepth;
-	if (options.depth > maxDepth) {
+	const effectiveQueryMode = queryMode ?? "recursive";
+	if (effectiveQueryMode === "recursive" && options.depth > maxDepth) {
 		throw new Error(`Max recursion depth reached (${maxDepth})`);
+	}
+	const requestedModel = selectRequestedChildModel(
+		normalized.model,
+		effectiveQueryMode,
+		options.defaultSimpleModel,
+		options.defaultRecursiveModel,
+	);
+	if (!requestedModel && effectiveQueryMode === "simple") {
+		if (options.simpleChildDisabled) {
+			if (options.onMissingSimpleChildModel === "fail" || options.onMissingSimpleChildModel === "warn-and-disable") {
+				throw new Error("Simple child model is required but disabled by the active profile.");
+			}
+		}
+	}
+	if (!requestedModel && effectiveQueryMode === "recursive" && !options.recursiveChildInheritParentByDefault) {
+		if (options.onMissingRecursiveChildModel === "fail" || options.onMissingRecursiveChildModel === "warn-and-disable") {
+			throw new Error("Recursive child model is required by the active profile but not provided.");
+		}
+	}
+	if (effectiveQueryMode === "recursive" && options.recursiveChildDisabled) {
+		throw new Error("Recursive child helper is disabled by the active profile.");
+	}
+	const modelConfig = await resolveChildModel(
+		ctx,
+		requestedModel,
+		effectiveQueryMode,
+		options.parentThinkingLevel,
+	);
+	if (modelConfig.override) options.onResolvedModel?.(modelConfig.override);
+
+	if (effectiveQueryMode === "simple") {
+		const sessionManager = SessionManager.inMemory(ctx.cwd);
+		const run = await runChildSession({
+			ctx,
+			sessionManager,
+			tools: [],
+			prompt: normalized.prompt,
+			childId: createChildId(),
+			maxTurns: SIMPLE_QUERY_MAX_TURNS,
+			modelConfig,
+		});
+		const parsed = parseChildResult(run.text, normalized, run.turns || 1);
+		return {
+			...parsed,
+			role: normalized.role,
+			usage: { turns: run.turns || 1 },
+		};
 	}
 
 	const childId = createChildId();
@@ -359,9 +509,12 @@ export async function runChildQuery(
 			extensionFactory: options.extensionFactory,
 			sessionManager: primarySessionManager,
 			tools: builtInTools,
-			prompt: buildChildPrompt(normalized, { workspace: parentWorkspace }),
+			prompt: buildChildPrompt(normalized, {
+				workspace: parentWorkspace,
+			}),
 			childId,
 			maxTurns,
+			modelConfig,
 			onProgress: options.onProgress,
 		});
 
@@ -443,6 +596,7 @@ export async function runChildQuery(
 			}),
 			childId,
 			maxTurns: 1,
+			modelConfig,
 			onProgress: options.onProgress,
 		});
 

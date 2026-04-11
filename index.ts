@@ -10,7 +10,10 @@ export function createRlmExtension(options: RlmExtensionOptions = {}): Extension
 		depth: 0,
 		maxDepth: options.maxDepth ?? 2,
 		root: true,
-		promptMode: options.promptMode ?? "balanced",
+		profile: options.profile,
+		profiles: options.profiles,
+		profileConfigPath: options.profileConfigPath,
+		externalizationKernel: options.externalizationKernel,
 	});
 }
 

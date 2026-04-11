@@ -100,7 +100,7 @@ describe("restore helpers", () => {
 				childArtifacts: [],
 				childArtifactSummaries: [],
 				activeContext: expect.objectContaining({ goal: "a" }),
-				meta: { version: 1 },
+				meta: expect.objectContaining({ version: 1 }),
 			}),
 		);
 	});
@@ -288,7 +288,7 @@ describe("restore helpers", () => {
 				done: ["scan"],
 				childArtifacts: [],
 				childArtifactSummaries: [],
-				meta: { version: 1 },
+				meta: expect.objectContaining({ version: 1 }),
 			}),
 		});
 	});

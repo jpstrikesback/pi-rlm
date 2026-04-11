@@ -20,10 +20,10 @@ const snapshot: RuntimeSnapshot = {
 };
 
 describe("collectRlmSessionStats", () => {
-	it("collects prompt mode, exec counts, child stats, var counts, and leaf tool counts", () => {
+	it("collects profile, exec counts, child stats, var counts, and leaf tool counts", () => {
 		const ctx = makeCtx([
 			{ type: "custom", customType: "rlm-mode", data: { enabled: true } },
-			{ type: "custom", customType: "rlm-prompt-mode", data: { mode: "coordinator" } },
+			{ type: "custom", customType: "rlm-profile", data: { profile: "coordinator-lite" } },
 			{ type: "message", message: { role: "toolResult", toolName: "read", details: {} } },
 			{
 				type: "message",
@@ -42,7 +42,7 @@ describe("collectRlmSessionStats", () => {
 
 		expect(collectRlmSessionStats(ctx, { depth: 0, maxDepth: 2 })).toEqual({
 			enabled: true,
-			promptMode: "coordinator",
+			profile: "coordinator-lite",
 			depth: 0,
 			maxDepth: 2,
 			execCount: 1,
@@ -59,7 +59,7 @@ describe("collectRlmSessionStats", () => {
 
 		expect(collectRlmSessionStats(ctx, { depth: 1, maxDepth: 3 })).toEqual({
 			enabled: false,
-			promptMode: "balanced",
+			profile: "openai-5.4-class",
 			depth: 1,
 			maxDepth: 3,
 			execCount: 0,
@@ -74,7 +74,7 @@ describe("collectRlmSessionStats", () => {
 	it("prefers the live runtime snapshot when provided", () => {
 		const ctx = makeCtx([
 			{ type: "custom", customType: "rlm-mode", data: { enabled: true } },
-			{ type: "custom", customType: "rlm-prompt-mode", data: { mode: "aggressive" } },
+			{ type: "custom", customType: "rlm-profile", data: { profile: "openai-5.4-class" } },
 		]);
 		const liveSnapshot: RuntimeSnapshot = {
 			version: 1,

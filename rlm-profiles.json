@@ -1,0 +1,107 @@
+{
+	"name": "rlm-profiles",
+	"version": "1",
+	"profiles": {
+		"openai-5.4-class": {
+			"name": "openai-5.4-class",
+			"description": "OpenAI 5.4-class baseline with conservative simple helpers and parent-model recursive defaults.",
+			"behavior": {
+				"guidanceVariant": "recursive-first",
+				"taskFewShotVariant": "artifact-workflow-openai-v1",
+				"rootKickoffVariant": "recursive-chain-v1",
+				"directToolBias": "high",
+				"runtimeBias": "high",
+				"recursiveBias": "high",
+				"shortestExecProgram": true,
+				"avoidManualScanSubstitution": true,
+				"simplifyAfterOptionalFailure": false
+			},
+			"helpers": {
+				"simpleChild": {
+					"defaultModel": "openai-codex/gpt-5.4-mini:off",
+					"thinking": "off",
+					"budget": "low"
+				},
+				"recursiveChild": {
+					"inheritParentByDefault": true
+				}
+			},
+			"fallback": {
+				"onMissingSimpleChildModel": "warn-and-inherit",
+				"onMissingRecursiveChildModel": "warn-and-inherit"
+			}
+		},
+		"inherit-parent-class": {
+			"name": "inherit-parent-class",
+			"description": "Prefer inherited parent model behavior and explicit per-call overrides.",
+			"behavior": {
+				"guidanceVariant": "default",
+				"taskFewShotVariant": "artifact-workflow-neutral-v1",
+				"rootKickoffVariant": "none",
+				"directToolBias": "medium",
+				"runtimeBias": "medium",
+				"recursiveBias": "medium",
+				"shortestExecProgram": true,
+				"avoidManualScanSubstitution": true,
+				"simplifyAfterOptionalFailure": true
+			},
+			"helpers": {
+				"recursiveChild": {
+					"inheritParentByDefault": true
+				}
+			},
+			"fallback": {
+				"onMissingSimpleChildModel": "warn-and-inherit",
+				"onMissingRecursiveChildModel": "warn-and-inherit"
+			}
+		},
+		"mlx-qwopus-class": {
+			"name": "mlx-qwopus-class",
+			"description": "Local MLX/Qwopus profile with stronger early-runtime pressure and conservative helper use.",
+			"behavior": {
+				"guidanceVariant": "default",
+				"taskFewShotVariant": "artifact-workflow-local-v1",
+				"rootKickoffVariant": "none",
+				"directToolBias": "medium",
+				"runtimeBias": "high",
+				"recursiveBias": "low",
+				"shortestExecProgram": true,
+				"avoidManualScanSubstitution": true,
+				"simplifyAfterOptionalFailure": true
+			},
+			"helpers": {
+				"recursiveChild": {
+					"inheritParentByDefault": true
+				}
+			},
+			"fallback": {
+				"onMissingSimpleChildModel": "warn-and-inherit",
+				"onMissingRecursiveChildModel": "warn-and-inherit"
+			}
+		},
+		"mlx-qwopus-legacy-dense": {
+			"name": "mlx-qwopus-legacy-dense",
+			"description": "Local MLX/Qwopus profile that restores the earlier dense rlm_exec coordinator contract that previously correlated with better runtime entry on MLX.",
+			"behavior": {
+				"guidanceVariant": "default",
+				"taskFewShotVariant": "artifact-workflow-local-v1",
+				"rootKickoffVariant": "none",
+				"directToolBias": "medium",
+				"runtimeBias": "high",
+				"recursiveBias": "low",
+				"shortestExecProgram": true,
+				"avoidManualScanSubstitution": true,
+				"simplifyAfterOptionalFailure": true
+			},
+			"helpers": {
+				"recursiveChild": {
+					"inheritParentByDefault": true
+				}
+			},
+			"fallback": {
+				"onMissingSimpleChildModel": "warn-and-inherit",
+				"onMissingRecursiveChildModel": "warn-and-inherit"
+			}
+		}
+	}
+}

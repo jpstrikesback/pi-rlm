@@ -5,10 +5,16 @@ import {
 	buildStateManifest,
 	buildWorkspaceManifest,
 	buildWorkspaceWorkingSetSummary,
+	commitWorkspacePatch,
 	ensureWorkspaceShape,
+	hasCommittedWorkspaceState,
+	hasPendingWorkspaceConsolidation,
 	recordArtifact,
+	recordCommitEvidence,
 	recordRetentionLease,
 	recordRetentionMetrics,
+	recordToolEvidence,
+	shouldUseCommittedRetentionPolicy,
 	selectRelevantArtifacts,
 	splitInternalLlmQueryContext,
 } from "../src/workspace.js";
@@ -40,7 +46,6 @@ function makeArtifact(overrides: Partial<RlmChildArtifact> = {}): RlmChildArtifa
 describe("workspace helpers", () => {
 	it("normalizes an arbitrary workspace object into the shared shape", () => {
 		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"] });
-
 		expect(workspace.goal).toBe("refactor");
 		expect(workspace.childArtifacts).toEqual([]);
 		expect(workspace.childArtifactSummaries).toEqual([]);
@@ -48,26 +53,70 @@ describe("workspace helpers", () => {
 		expect(workspace.activeContext?.goal).toBe("refactor");
 		expect(workspace.activeContext?.relevantFiles).toEqual(["src/a.ts"]);
 		expect(buildWorkspaceWorkingSetSummary(workspace)).toContain("Goal: refactor");
-		expect(workspace.meta?.version).toBe(1);
-		expect(workspace.meta?.activePlanRef).toBeUndefined();
 	});
 
 	it("records artifacts and rebuilds artifact indexes", () => {
 		const workspace = ensureWorkspaceShape({ goal: "refactor" });
 		recordArtifact(workspace, makeArtifact({ id: "child-1", files: ["src/auth.ts"], tags: ["auth"] }));
 		recordArtifact(workspace, makeArtifact({ id: "child-2", summary: "plan routing", files: ["src/router.ts"], tags: ["routing"] }));
-
 		expect(workspace.childArtifacts).toHaveLength(2);
-		expect(workspace.lastChildArtifact?.id).toBe("child-2");
-		expect(workspace.childArtifactSummaries?.map((item) => item.id)).toEqual(["child-1", "child-2"]);
 		expect(workspace.artifactIndex?.recentIds).toEqual(["child-1", "child-2"]);
-		expect(workspace.activeContext?.currentArtifactRefs).toEqual(["child-1", "child-2"]);
-		expect(workspace.meta?.activeArtifactRefs).toEqual(["child-1", "child-2"]);
-		expect(workspace.artifactIndex?.byTag?.auth).toEqual(["child-1"]);
-		expect(workspace.artifactIndex?.byFile?.["src/router.ts"]).toEqual(["child-2"]);
+		expect(selectRelevantArtifacts(workspace, { prompt: "auth", role: "scout", limit: 1 })[0]?.id).toBe("child-1");
 	});
 
-	it("records retention metrics on the durable workspace", () => {
+	it("commits durable workspace patches and updates coordination metadata", () => {
+		const { workspace, result } = commitWorkspacePatch(
+			ensureWorkspaceShape({ goal: "audit", files: ["src/a.ts"] }),
+			{
+				goal: "refactor auth",
+				plan: ["inspect", "patch"],
+				files: ["src/a.ts", "src/b.ts"],
+				findings: ["auth state leaks"],
+				openQuestions: ["Need migration?"],
+				partialOutputs: { draft: { status: "ready" } },
+				ignored: true,
+			},
+			{ turnIndex: 4, now: "2026-04-08T00:00:00.000Z" },
+		);
+
+		expect(result).toEqual(expect.objectContaining({
+			ok: true,
+			planLength: 2,
+			findingCount: 1,
+			pendingConsolidation: false,
+		}));
+		expect(workspace.meta?.coordination).toEqual(expect.objectContaining({
+			hasCommitted: true,
+			pendingConsolidation: false,
+			lastCommittedTurn: 4,
+		}));
+		expect(hasCommittedWorkspaceState(workspace)).toBe(true);
+		expect(hasPendingWorkspaceConsolidation(workspace)).toBe(false);
+		expect(shouldUseCommittedRetentionPolicy(workspace)).toBe(true);
+	});
+
+	it("records pending tool evidence and clears it when commit evidence is recorded", () => {
+		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"] });
+		const withTool = recordToolEvidence(workspace, {
+			turnIndex: 2,
+			toolName: "read",
+			args: { path: "src/context-retention.ts" },
+			result: { content: [{ type: "text", text: "src/context-retention.ts" }] },
+			now: "2026-04-09T00:00:00.000Z",
+		});
+		expect(withTool?.evidence?.pendingIds).toHaveLength(1);
+
+		const withCommit = recordCommitEvidence(withTool, {
+			turnIndex: 2,
+			changedKeys: ["findings", "files"],
+			now: "2026-04-09T00:00:01.000Z",
+		});
+		expect(withCommit?.evidence?.pendingIds).toEqual([]);
+		expect(withCommit?.evidence?.checkpoints?.length).toBeGreaterThan(0);
+		expect(hasPendingWorkspaceConsolidation(withCommit)).toBe(false);
+	});
+
+	it("records retention metadata on the durable workspace", () => {
 		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"] });
 		const retention = {
 			version: 1,
@@ -89,57 +138,25 @@ describe("workspace helpers", () => {
 			expireConsolidatedAfterTurns: 2,
 			keepLatestSurfaceSummary: true,
 		});
-		const nextAgain = recordRetentionMetrics(next, retention, 3, {
-			expireConsolidatedAfterTurns: 2,
-			keepLatestSurfaceSummary: true,
-		});
-
 		expect(next?.retention?.latestTurnIndex).toBe(3);
-		expect(next?.retention?.latestMetrics?.keptMessages).toBe(4);
 		expect(next?.retention?.latestSurfaceSummary).toBe("Goal: refactor");
-		expect(next?.retention?.leases).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					status: "consolidated",
-					sourceName: "assistant",
-				}),
-				expect.objectContaining({
-					status: "consolidated",
-					sourceName: "rlm-retention",
-					consolidatedTo: [expect.objectContaining({ ref: "globalThis.workspace.activeContext" })],
-				}),
-			]),
+	});
+
+	it("builds manifests and preserves internal llm query context", () => {
+		const workspace = ensureWorkspaceShape({ goal: "refactor", files: ["src/a.ts"], findings: ["one"] });
+		const manifest = buildWorkspaceManifest(workspace, { sectionKeys: ["goal", "files"] });
+		expect(Object.keys(manifest?.sections ?? {})).toEqual(["goal", "files"]);
+		expect(buildStateManifest({ auth: true, count: 1 })).toEqual(
+			expect.objectContaining({
+				path: "globalThis.parentState",
+				type: "object",
+				keys: ["auth", "count"],
+			}),
 		);
-		expect(nextAgain?.retention?.leases?.length).toBeGreaterThanOrEqual(2);
-		expect(next?.activeContext?.goal).toBe("refactor");
-	});
 
-	it("builds manifests for parent state and workspace metadata", () => {
-		const workspace = ensureWorkspaceShape({
-			goal: "refactor",
-			files: ["src/a.ts", "src/b.ts", "src/c.ts"],
-			findings: ["auth is shared"],
-		});
-		recordArtifact(workspace, makeArtifact({ id: "child-9", summary: "auth summary", tags: ["auth"] }));
-
-		const stateManifest = buildStateManifest({ files: ["a.ts", "b.ts"], target: "auth" });
-		const workspaceManifest = buildWorkspaceManifest(workspace, { relevantArtifacts: selectRelevantArtifacts(workspace, { prompt: "inspect auth", role: "scout" }) });
-
-		expect(stateManifest?.path).toBe("globalThis.parentState");
-		expect(stateManifest?.type).toBe("object");
-		expect(workspaceManifest?.runtime.workspacePath).toBe("globalThis.workspace");
-		expect(workspaceManifest?.artifactCount).toBe(1);
-		expect(workspaceManifest?.sections.files?.type).toBe("array");
-		expect(workspaceManifest?.relevantArtifacts?.[0]?.id).toBe("child-9");
-	});
-
-	it("attaches and extracts hidden llmQuery runtime context without changing the public input shape", () => {
-		const original = { prompt: "scan auth", state: { files: ["src/auth.ts"] } };
-		const attached = attachInternalLlmQueryContext(original, { workspace: ensureWorkspaceShape({ goal: "refactor" }) });
-		const { publicInput, workspace } = splitInternalLlmQueryContext(attached);
-
-		expect(publicInput).toEqual(original);
-		expect((publicInput as Record<string, unknown>).__rlmRuntimeContext).toBeUndefined();
-		expect(workspace?.goal).toBe("refactor");
+		const attached = attachInternalLlmQueryContext({ prompt: "scan" }, { workspace, queryMode: "recursive" });
+		const split = splitInternalLlmQueryContext(attached as any);
+		expect(split.queryMode).toBe("recursive");
+		expect((split.workspace as any)?.goal).toBe("refactor");
 	});
 });

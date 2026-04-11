@@ -1,0 +1,64 @@
+{
+	"version": 1,
+	"profiles": {
+		"clone-test": {
+			"name": "clone-test",
+			"description": "OpenAI 5.4-class baseline with conservative simple helpers and parent-model recursive defaults.",
+			"behavior": {
+				"guidanceVariant": "recursive-first",
+				"taskFewShotVariant": "artifact-workflow-openai-v1",
+				"rootKickoffVariant": "recursive-chain-v1",
+				"directToolBias": "high",
+				"runtimeBias": "high",
+				"recursiveBias": "high",
+				"shortestExecProgram": true,
+				"avoidManualScanSubstitution": true,
+				"simplifyAfterOptionalFailure": false
+			},
+			"helpers": {
+				"simpleChild": {
+					"defaultModel": "openai-codex/gpt-5.4-mini:off",
+					"thinking": "off",
+					"budget": "low"
+				},
+				"recursiveChild": {
+					"inheritParentByDefault": true
+				}
+			},
+			"fallback": {
+				"onMissingSimpleChildModel": "warn-and-inherit",
+				"onMissingRecursiveChildModel": "warn-and-inherit"
+			},
+			"promptOverrides": {
+				"rootKickoff": {
+					"current": {
+						"root": "Root kickoff policy:\nSay 'Bonjour', then: Loop: decompose -> solve branches -> compose -> review -> recompose.\n- For nontrivial tasks, start in rlm_exec and make one planner rlm_query before the main work.\n- Solve hard branches with rlm_query, use llm_query only for bounded substeps inside a branch, and use direct tools for grounded work.\n- Compose in rlm_exec from committed child outputs and workspace state, not only from root-local reasoning.\n- After preview or critique, make one reviewer rlm_query before revising, then recompose in rlm_exec from the committed review output while preserving committed constraints.\n- Skip this kickoff on trivial one-shot tasks.\n- Do not do all five phases only in root-local reasoning when child queries are available.",
+						"exec": "Root kickoff mirror:\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- At the start of a nontrivial task, make one planner rlm_query inside rlm_exec before the main work.\n- Use rlm_query for hard branches, llm_query only for bounded substeps, and direct tools for grounded work.\n- After the first composition, make one reviewer rlm_query before revising, then recompose from committed review output and preserved constraints.\n- Do not satisfy this policy with purely local root reasoning when helper execution is available."
+					},
+					"no-subcalls": {
+						"root": "Root kickoff policy:\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- For nontrivial tasks, start in rlm_exec, write the decomposition into workspace state, and continue there because child-query helpers are disabled in this mode.\n- Use workspace state as the decomposition notebook and keep the current constraints there.\n- Compose and recompose in rlm_exec from committed workspace state.\n- After preview or critique, commit selected fixes and preserved constraints into workspace state before revising.\n- Skip this kickoff on trivial one-shot tasks.\n- Do not do all five phases only in root-local reasoning when child queries are available.",
+						"exec": "Root kickoff mirror:\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- In no-subcalls mode, commit the decomposition, the review notes, and the preserved constraints into workspace state before each major compose or recompose step.\n- Use direct tools for grounded work and workspace state for preservation.\n- Recompose from committed review notes and preserved constraints.\n- Do not satisfy this policy with purely local root reasoning when helper execution is available."
+					}
+				},
+				"taskFewShot": {
+					"current": {
+						"root": "Task-family workflow few-shot (profile-owned, fixed across tasks):\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- For nontrivial artifact tasks, do not jump straight to a full final artifact.\n- Decompose in rlm_exec with one planner rlm_query before the main work.\n- Solve hard branches with rlm_query, use llm_query only for bounded substeps, and use direct tools for grounded work.\n- Compose the first pass in rlm_exec from committed child outputs and workspace state.\n- After preview or critique, make one reviewer rlm_query before revising.\n- Recompose in rlm_exec from committed review output while preserving committed constraints and already-achieved gains unless the user changes them.\n- Do not let required structure disappear during recomposition.",
+						"exec": "Workflow mirror (compact):\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- Artifact tasks: planner rlm_query -> solve hard branches -> compose first pass -> reviewer rlm_query -> recompose -> finalize.\n- Use llm_query only for bounded substeps inside a branch solver.\n- Preserve committed constraints and required components across recomposition."
+					},
+					"no-subcalls": {
+						"root": "Task-family workflow few-shot (profile-owned, fixed across tasks):\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- For nontrivial artifact tasks, do not jump straight to a full final artifact.\n- Decompose in rlm_exec by committing a compact plan and constraints into workspace state.\n- Solve grounded work with direct tools and keep branch decisions in workspace state.\n- Compose the first pass in rlm_exec from committed plan and constraints.\n- After preview or critique, commit selected fixes and preserved constraints before revising.\n- Recompose in rlm_exec from committed review output while preserving committed constraints and already-achieved gains unless the user changes them.\n- Do not let required structure disappear during recomposition.",
+						"exec": "Workflow mirror (compact):\nLoop: decompose -> solve branches -> compose -> review -> recompose.\n- Artifact tasks: commit plan and constraints -> compose first pass -> commit review notes -> recompose -> finalize.\n- Use direct tools for grounded work and workspace state for preservation.\n- Preserve committed constraints and required components across recomposition."
+					}
+				},
+				"execPromptSnippet": {
+					"current": "Use this only when the task needs durable state, recursive subcalls, or a working set larger than the transcript should hold. Stay with direct tools for trivial one-shot tasks, and prefer the shortest successful runtime program.",
+					"no-subcalls": "Use this for durable runtime/workspace work with direct leaf-tool actions, short-lived variables, and no child-query helper calls. Prefer the shortest successful runtime program."
+				},
+				"execCodeParamDescription": {
+					"current": "JavaScript to execute. Runtime helpers include context/context.compiledContext, history/history_n, llm_query, llm_query_batched, rlm_query, rlm_query_batched, llmQuery, SHOW_VARS, FINAL, FINAL_VAR, inspectGlobals, final, and globalThis.workspace.commit({...}). Treat history as metadata-only fallback, not replay memory. If the task explicitly requests llm_query or rlm_query, call those helpers directly unless they are actually blocked; avoid file writes or extra persistence ceremony unless the task explicitly requires them.",
+					"no-subcalls": "JavaScript to execute. Runtime helpers include context/context.compiledContext, history/history_n, SHOW_VARS, FINAL, FINAL_VAR, inspectGlobals, final, and globalThis.workspace.commit({...}). Child-query helpers are disabled in this mode; use direct leaf actions, runtime variables/buffers, and deterministic compiled workspace context instead. Prefer the shortest successful runtime program; avoid file writes or extra persistence ceremony unless the task explicitly requires them."
+				}
+			}
+		}
+	}
+}

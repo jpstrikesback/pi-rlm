@@ -1,108 +1,75 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { canonicalizeProviderPayload, longestCommonPrefixChars, parseMlxUsage, parseProviderUsage, sumUsage } from "../scripts/eval/metrics.js";
+import { analyzeAssistantPathCitations, analyzeCommitTruthfulness, computeRepeatedReadRatio } from "../scripts/eval/metrics.js";
 
-describe("eval metrics helpers", () => {
-	it("canonicalizes provider payloads with stable key ordering", () => {
-		const left = canonicalizeProviderPayload({
-			messages: [{ role: "user", content: "hello" }],
-			model: "mlx",
-			temperature: 0,
-			stream: true,
-			z: 1,
-			a: 2,
-		});
-		const right = canonicalizeProviderPayload({
-			a: 2,
-			z: 1,
-			stream: true,
-			temperature: 0,
-			model: "mlx",
-			messages: [{ content: "hello", role: "user" }],
-		});
-
-		expect(left).toBe(right);
-	});
-
-	it("computes longest common prefix", () => {
-		expect(longestCommonPrefixChars("abcdef", "abcXYZ")).toBe(3);
-		expect(longestCommonPrefixChars("same", "same")).toBe(4);
-		expect(longestCommonPrefixChars("", "same")).toBe(0);
-	});
-
-	it("parses direct mlx usage payloads", () => {
-		const usage = parseMlxUsage(
-			JSON.stringify({
-				usage: {
-					prompt_tokens: 1056,
-					completion_tokens: 50,
-					total_tokens: 1106,
-					prompt_tokens_details: { cached_tokens: 1024 },
-				},
-			}),
+describe("analyzeCommitTruthfulness", () => {
+	it("flags explicit commit claims when no actual commit happened", () => {
+		const result = analyzeCommitTruthfulness(
+			"Done — I committed the reusable findings into globalThis.workspace and finalized from runtime state.",
+			0,
 		);
 
-		expect(usage).toEqual({
-			promptTokens: 1056,
-			completionTokens: 50,
-			totalTokens: 1106,
-			cacheHitTokens: 1024,
-			cacheMissTokens: 32,
-		});
+		expect(result.claimedCommit).toBe(true);
+		expect(result.actualCommit).toBe(false);
+		expect(result.falseClaim).toBe(true);
+		expect(result.claimSignals.length).toBeGreaterThan(0);
 	});
 
-	it("parses streamed mlx usage chunks", () => {
-		const usage = parseMlxUsage([
-			'data: {"choices":[{"delta":{"content":"hi"}}]}',
-			'data: {"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80}}}',
-			"data: [DONE]",
-		].join("\n"));
-
-		expect(usage).toEqual({
-			promptTokens: 100,
-			completionTokens: 5,
-			totalTokens: 105,
-			cacheHitTokens: 80,
-			cacheMissTokens: 20,
-		});
-	});
-
-	it("parses openai responses usage payloads", () => {
-		const usage = parseProviderUsage(
-			"openai-responses",
-			JSON.stringify({
-				type: "response.completed",
-				response: {
-					usage: {
-						input_tokens: 1200,
-						output_tokens: 75,
-						total_tokens: 1275,
-						input_tokens_details: { cached_tokens: 1100 },
-					},
-				},
-			}),
+	it("does not flag conceptual mentions of commit as actual claims", () => {
+		const result = analyzeCommitTruthfulness(
+			"Strongest recommendation: make workspace.commit the mandatory handoff point after leaf-tool bursts.",
+			0,
 		);
 
-		expect(usage).toEqual({
-			promptTokens: 1200,
-			completionTokens: 75,
-			totalTokens: 1275,
-			cacheHitTokens: 1100,
-			cacheMissTokens: 100,
-		});
+		expect(result.claimedCommit).toBe(false);
+		expect(result.falseClaim).toBe(false);
+	});
+});
+
+describe("computeRepeatedReadRatio", () => {
+	it("returns undefined when there are no read paths", () => {
+		expect(computeRepeatedReadRatio([])).toBeUndefined();
 	});
 
-	it("sums usage across request logs", () => {
-		const usage = sumUsage([
-			{ usage: { promptTokens: 10, completionTokens: 2, totalTokens: 12, cacheHitTokens: 8, cacheMissTokens: 2 } },
-			{ usage: { promptTokens: 5, completionTokens: 1, totalTokens: 6, cacheHitTokens: 0, cacheMissTokens: 5 } },
-		]);
+	it("counts duplicated reads as a ratio of total reads", () => {
+		expect(computeRepeatedReadRatio(["src/a.ts", "src/b.ts", "src/a.ts", "src/a.ts"])).toBe(0.5);
+	});
+});
 
-		expect(usage).toEqual({
-			promptTokens: 15,
-			completionTokens: 3,
-			totalTokens: 18,
-			cacheHitTokens: 8,
-			cacheMissTokens: 7,
-		});
+describe("analyzeAssistantPathCitations", () => {
+	const repoRoot = process.cwd();
+
+	it("detects existing and missing local path citations", () => {
+		const result = analyzeAssistantPathCitations(
+			"Relevant files: src/runtime.ts, README.md, and src/does-not-exist.ts",
+			repoRoot,
+		);
+
+		expect(result).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ cited: "src/runtime.ts", exists: true, kind: "file" }),
+				expect.objectContaining({ cited: "README.md", exists: true, kind: "file" }),
+				expect.objectContaining({ cited: "src/does-not-exist.ts", exists: false }),
+			]),
+		);
+	});
+
+	it("ignores obvious non-path tokens like model selectors and globals", () => {
+		const result = analyzeAssistantPathCitations(
+			"Use openai/gpt-5.4-mini, inspect globalThis.workspace, and check src/workspace.ts",
+			repoRoot,
+		);
+
+		expect(result.some((citation) => citation.cited === "openai/gpt-5.4-mini")).toBe(false);
+		expect(result.some((citation) => citation.cited === "globalThis.workspace")).toBe(false);
+		expect(result.some((citation) => citation.cited === "src/workspace.ts")).toBe(true);
+	});
+
+	it("resolves relative citations against the repo root", () => {
+		const result = analyzeAssistantPathCitations("Check scripts/eval.ts", repoRoot);
+		const citation = result.find((item) => item.cited === "scripts/eval.ts");
+
+		expect(citation?.resolvedPath).toBe(path.resolve(repoRoot, "scripts/eval.ts"));
+		expect(citation?.exists).toBe(true);
 	});
 });

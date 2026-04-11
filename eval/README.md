@@ -86,7 +86,7 @@ npm run eval -- \
   --subject ./dist/index.js \
   --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario extension-research \
-  --model-id gpt-5.4 \
+  --model-id gpt-5.4-mini \
   --auth-provider openai-codex
 ```
 
@@ -97,7 +97,7 @@ npm run eval -- \
   --subject ./dist/index.js \
   --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario extension-research \
-  --model-id gpt-5.4 \
+  --model-id gpt-5.4-mini \
   --model-provider openai-codex
 ```
 
@@ -119,7 +119,7 @@ npm run eval:compare -- \
   --candidate ./dist/index.js \
   --spy-entrypoint ../pi-spy/src/index.ts \
   --scenario rlm-refactor-review \
-  --model-id gpt-5.4 \
+  --model-id gpt-5.4-mini \
   --auth-provider openai-codex
 ```
 
@@ -177,3 +177,4 @@ The harness records:
 - The harness runs against built extension artifacts, not source files.
 - This keeps A/B comparisons honest and close to what Pi actually loads.
 - For stable comparisons, use the same provider profile, upstream, and model setup for both subjects.
+- Current RLM-heavy eval scenarios prefer profile-driven defaults, for example via `rlm-profile=openai-5.4-class` to align child helper selection with the scenario's built-in profile policy.

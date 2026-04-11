@@ -1,4 +1,6 @@
-import type { ProxyLogEntry, ProxyUsage } from "./types.js";
+import { existsSync, statSync } from "node:fs";
+import path from "node:path";
+import type { EvalCommitTruthfulness, EvalPathCitation, ProxyLogEntry, ProxyUsage } from "./types.js";
 
 const EMPTY_USAGE: ProxyUsage = {
 	promptTokens: 0,
@@ -100,6 +102,91 @@ export function parseProviderUsage(
 
 export function parseMlxUsage(responseText: string): ProxyUsage | undefined {
 	return parseProviderUsage("openai-completions", responseText);
+}
+
+const COMMIT_CLAIM_PATTERNS: RegExp[] = [
+	/\b(?:i|we)\s+(?:have\s+|had\s+|also\s+|already\s+)?(?:re-?)?committed\b/iu,
+	/\b(?:i|we)\s+(?:have\s+)?committed\b[^.\n]*\b(?:into|to|back into|back to)\b[^.\n]*\b(?:workspace|globalThis\.workspace)\b/iu,
+	/\b(?:re-?)?committed\b[^.\n]*\b(?:workspace|globalThis\.workspace)\b/iu,
+];
+
+const KNOWN_RELATIVE_ROOTS = /^(?:src|tests|docs|scripts|eval|examples|node_modules|dist)\//i;
+const KNOWN_TOP_LEVEL_FILES = new Set([
+	"README.md",
+	"package.json",
+	"tsconfig.json",
+	"tsconfig.build.json",
+	"AGENTS.md",
+]);
+const FILE_LIKE_EXTENSION = /\.(?:ts|tsx|js|jsx|json|md|txt|yml|yaml|mjs|cjs|css|html|sh|py|rs|go)$/i;
+const PATH_TOKEN_RE = /(?:\/[^\s`"'(),:;\]]+)+|(?:\.{1,2}\/[^\s`"'(),:;\]]+)+|(?:[A-Za-z0-9_.-]+\/(?:[^\s`"'(),:;\]]+))+|(?:[A-Za-z0-9_.-]+\.(?:ts|tsx|js|jsx|json|md|txt|yml|yaml|mjs|cjs|css|html|sh|py|rs|go))/g;
+
+function normalizeCandidateToken(token: string): string {
+	return token.replace(/^[`'"([{<]+|[`'"\])}>.,:;!?]+$/g, "").trim();
+}
+
+function isLikelyLocalPathToken(token: string): boolean {
+	if (!token) return false;
+	if (token.includes("://")) return false;
+	if (token.startsWith("globalThis.")) return false;
+	if (token.includes("workspace.commit")) return false;
+	if (path.isAbsolute(token)) return true;
+	if (token.startsWith("./") || token.startsWith("../")) return true;
+	if (KNOWN_TOP_LEVEL_FILES.has(token)) return true;
+	if (KNOWN_RELATIVE_ROOTS.test(token)) return true;
+	if (FILE_LIKE_EXTENSION.test(token) && !token.includes(":")) return true;
+	return false;
+}
+
+function resolveCitationPath(cited: string, repoRoot: string): string {
+	if (path.isAbsolute(cited)) return path.normalize(cited);
+	return path.resolve(repoRoot, cited);
+}
+
+export function analyzeCommitTruthfulness(assistantText: string, actualCommitCount: number): EvalCommitTruthfulness {
+	const claimSignals = COMMIT_CLAIM_PATTERNS
+		.flatMap((pattern) => {
+			const match = assistantText.match(pattern);
+			return match?.[0] ? [match[0]] : [];
+		});
+	const claimedCommit = claimSignals.length > 0;
+	const actualCommit = actualCommitCount > 0;
+	return {
+		claimedCommit,
+		actualCommit,
+		falseClaim: claimedCommit && !actualCommit,
+		claimSignals: Array.from(new Set(claimSignals)),
+	};
+}
+
+export function analyzeAssistantPathCitations(assistantText: string, repoRoot: string): EvalPathCitation[] {
+	const candidates = Array.from(new Set((assistantText.match(PATH_TOKEN_RE) ?? []).map(normalizeCandidateToken).filter(isLikelyLocalPathToken)));
+	return candidates.map((cited) => {
+		const resolvedPath = resolveCitationPath(cited, repoRoot);
+		if (!existsSync(resolvedPath)) {
+			return { cited, resolvedPath, exists: false };
+		}
+		const stats = statSync(resolvedPath);
+		return {
+			cited,
+			resolvedPath,
+			exists: true,
+			kind: stats.isDirectory() ? "directory" : "file",
+		};
+	});
+}
+
+export function computeRepeatedReadRatio(readPaths: string[]): number | undefined {
+	if (readPaths.length === 0) return undefined;
+	const counts = new Map<string, number>();
+	for (const path of readPaths) {
+		counts.set(path, (counts.get(path) ?? 0) + 1);
+	}
+	let repeatedReads = 0;
+	for (const count of counts.values()) {
+		if (count > 1) repeatedReads += count - 1;
+	}
+	return repeatedReads / readPaths.length;
 }
 
 function tryParseJson(text: string): unknown {

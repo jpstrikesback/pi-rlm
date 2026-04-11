@@ -7,10 +7,9 @@ describe("parseRlmCommandAction", () => {
 		expect(parseRlmCommandAction("   ")).toEqual({ type: "toggle" });
 	});
 
-	it("parses prompt mode changes", () => {
-		expect(parseRlmCommandAction("balanced")).toEqual({ type: "set-mode", mode: "balanced" });
-		expect(parseRlmCommandAction("coordinator")).toEqual({ type: "set-mode", mode: "coordinator" });
-		expect(parseRlmCommandAction("aggressive")).toEqual({ type: "set-mode", mode: "aggressive" });
+	it("parses profile changes", () => {
+		expect(parseRlmCommandAction("profile openai-5.4-class")).toEqual({ type: "set-profile", profile: "openai-5.4-class" });
+		expect(parseRlmCommandAction("profile inherit-parent-class")).toEqual({ type: "set-profile", profile: "inherit-parent-class" });
 	});
 
 	it("parses inspect and reset actions", () => {
@@ -20,6 +19,59 @@ describe("parseRlmCommandAction", () => {
 
 	it("returns invalid for unknown subcommands", () => {
 		expect(parseRlmCommandAction("on")).toEqual({ type: "invalid", value: "on" });
-		expect(parseRlmCommandAction("prompt coordinator")).toEqual({ type: "invalid", value: "prompt coordinator" });
+		expect(parseRlmCommandAction("prompt profile openai-5.4-class")).toEqual({ type: "invalid", value: "prompt profile openai-5.4-class" });
+	});
+
+	it("opens profile menu for profile without args", () => {
+		expect(parseRlmCommandAction("profile")).toEqual({ type: "profile-menu" });
+	});
+
+	it("parses profile list", () => {
+		expect(parseRlmCommandAction("profile list")).toEqual({ type: "list-profiles" });
+	});
+
+	it("parses profile add with JSON payload", () => {
+		expect(parseRlmCommandAction('profile add my-profile {"name":"my-profile","behavior":{"guidanceVariant":"default"}}')).toEqual({
+			type: "add-profile",
+			profile: "my-profile",
+			value: '{"name":"my-profile","behavior":{"guidanceVariant":"default"}}',
+		});
+	});
+
+	it("parses profile clone", () => {
+		expect(parseRlmCommandAction("profile clone openai-5.4-class my-profile")).toEqual({
+			type: "clone-profile",
+			sourceProfile: "openai-5.4-class",
+			profile: "my-profile",
+		});
+	});
+
+	it("parses profile remove", () => {
+		expect(parseRlmCommandAction("profile remove my-profile")).toEqual({
+			type: "remove-profile",
+			profile: "my-profile",
+		});
+	});
+
+	it("parses profile set alias", () => {
+		expect(parseRlmCommandAction("profile set my-profile")).toEqual({ type: "set-profile", profile: "my-profile" });
+	});
+
+	it("parses profile inspect for active profile", () => {
+		expect(parseRlmCommandAction("profile inspect")).toEqual({ type: "inspect-profile", profile: undefined });
+	});
+
+	it("parses profile inspect with explicit profile", () => {
+		expect(parseRlmCommandAction("profile inspect my-profile")).toEqual({
+			type: "inspect-profile",
+			profile: "my-profile",
+		});
+	});
+
+	it("parses profile show alias", () => {
+		expect(parseRlmCommandAction("profile show my-profile")).toEqual({
+			type: "inspect-profile",
+			profile: "my-profile",
+		});
 	});
 });

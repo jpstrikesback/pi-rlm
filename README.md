@@ -4,9 +4,9 @@
 
 # pi-turtle-rlm
 
-**Recursive language model runtime for [Pi](https://github.com/mariozechner/pi-coding-agent)** — a persistent JS workspace inside the agent, with structured child calls via `llmQuery`, prompt modes, and session stats.
+**Recursive language model runtime for [Pi](https://github.com/mariozechner/pi-coding-agent)** — a persistent JS workspace inside the agent, with paper-style runtime helpers, structured child calls, and execution profiles.
 
-> **[Turtles all the way down](https://arxiv.org/abs/2512.24601)** — each turtle is an `llmQuery` call, each shell is `globalThis`, base case `maxDepth`, or just run out of tokens.
+> **[Turtles all the way down](https://arxiv.org/abs/2512.24601)** — each turtle is an `rlm_query` call, each shell is `globalThis`, base case `maxDepth`, or just run out of tokens.
 
 [![npm version](https://img.shields.io/npm/v/pi-turtle-rlm.svg)](https://www.npmjs.com/package/pi-turtle-rlm)
 [![License](https://img.shields.io/npm/l/pi-turtle-rlm.svg)](./LICENSE)
@@ -56,27 +56,65 @@ After install, start Pi as usual from your repo; the extension loads from Pi’s
 
 1. Turn RLM on: `/rlm`
 2. Same command takes subcommands:
-   - `/rlm balanced` | `/rlm coordinator` | `/rlm aggressive` — prompt mode
+   - `/rlm profile <name>` — switch active execution profile
+   - `/rlm profile list` — list configured profiles
+   - `/rlm profile` — open a profile submenu in interactive mode
+   - `/rlm profile add <name> <json>` — add or overwrite a profile in the project `.pi/agent/rlm-config.json` (or the explicit config path, if configured)
+   - `/rlm profile clone <from> <to>` — clone any resolved profile into a user-defined profile
+   - `/rlm profile inspect [name]` — show profile details in a compact JSON view (active profile if omitted)
+   - `/rlm profile remove <name>` — remove a user-defined profile
    - `/rlm inspect` — runtime globals
    - `/rlm reset` — clear runtime
 
-When RLM is on you get a pink **RLM MODE** widget (with mode label) and footer stats: depth, `rlm_exec` count, child queries / turns, runtime variable count, and non-RLM tool calls (“leaf” count).
+For the full configuration surface (profile schema, flag matrix, path precedence, and command side effects), see [`docs/rlm-configuration-api.md`](./docs/rlm-configuration-api.md).
+
+User profiles can be managed either via the command above or by editing `.pi/agent/rlm-config.json` in your project or home Pi agent folder.
+By default, `add` writes to the project config file; if an explicit config path is configured, it writes there instead.
+If the target file does not exist, `add` creates the config directory and file when possible.
+Typing `/rlm profile ...` now exposes profile subcommand options in the Pi slash menu.
+
+When RLM is on you get a pink **RLM PROFILE** widget (active profile name) and footer stats: depth, `rlm_exec` count, child queries / turns, runtime variable count, and non-RLM tool calls (“leaf” count).
 
 ## Why RLM?
 
-Large refactors need more room for context than a single chat transcript. This extension gives the model a persistent workspace to keep intermediate state, recurse with `llmQuery`, and avoid re-deriving the same context over and over.
+The goal of Pi Turtle RLM is to:
+
+1. treat the prompt as an **external object in a persistent programming environment**
+2. give the root model only **small metadata / symbolic handles** to that object
+3. make the model do real work through **code, variables, and programmatic recursive calls**
+4. keep intermediate state in **buffers / variables**, not in root transcript replay
+5. replay only **small metadata** about execution, not raw prompt/tool payloads
+
+In order to make large refactors easier for models to perform.
+
+Concretely, this extension gives the model a persistent runtime/workspace, lets it externalize intermediate state instead of repeatedly restating it in chat, recurse with `rlm_query`, use lightweight helper calls with `llm_query`, and carry forward compact working-set metadata rather than replaying the full raw transcript.
 
 ## Tools
+
+Public RLM tools:
 
 - `rlm_exec` — run JS in the persistent runtime
 - `rlm_inspect` — inspect runtime globals
 - `rlm_reset` — clear the runtime
 
-Inside `rlm_exec` you can use:
+Public runtime primitives inside `rlm_exec`:
 
+- `context`
+- `history`, plus `history_0 ... history_n`
 - `inspectGlobals()`
+- `SHOW_VARS()`
 - `final(value)`
-- `await llmQuery(request)`
+- `llm_query(...)`
+- `llm_query_batched(...)`
+- `rlm_query(...)`
+- `rlm_query_batched(...)`
+- `globalThis.workspace.commit({ goal, plan, files, findings, openQuestions, partialOutputs })`
+
+Also available for compatibility:
+
+- `llmQuery(...)` — legacy alias of `rlm_query(...)`
+- `FINAL(...)`
+- `FINAL_VAR(...)`
 
 ## Use in an extension
 
@@ -93,7 +131,24 @@ import { createRlmExtension } from "pi-turtle-rlm";
 
 export default createRlmExtension({
 	maxDepth: 3,
-	promptMode: "coordinator",
+	profile: "inherit-parent-class",
+	profiles: {
+		// Optional overrides for built-in defaults
+		"my-fast-profile": {
+			behavior: {
+				guidanceVariant: "default",
+				taskFewShotVariant: "artifact-workflow-neutral-v1",
+				rootKickoffVariant: "recursive-scout-v1",
+				directToolBias: "high",
+				runtimeBias: "medium",
+				recursiveBias: "low",
+			},
+			helpers: {
+				simpleChild: { defaultModel: "openai-codex/gpt-5.4-nano:off" },
+				recursiveChild: { inheritParentByDefault: true },
+			},
+		},
+	},
 });
 ```
 
@@ -103,14 +158,31 @@ The worker uses `node:vm` with several globals stripped. It is **not** a securit
 
 ## Advanced runtime usage
 
-Inside `rlm_exec`, the runtime also exposes `llmQuery(...)` for recursive child calls.
+Inside `rlm_exec`, the runtime exposes:
+
+- `llm_query(...)` for simple one-turn child calls with no RLM extension or tools
+- `rlm_query(...)` for recursive child sessions with workspace/artifact support
+- `llmQuery(...)` as the legacy alias of `rlm_query(...)`
+- exact per-call submodel selectors via `provider/id[:thinking]`
+
+Simple one-shot subcall:
 
 ```ts
-await llmQuery({
+await llm_query("Extract the config flags", {
+	model: "openai-codex/gpt-5.4-mini",
+	output: { mode: "json" },
+});
+```
+
+Recursive child call:
+
+```ts
+await rlm_query({
 	prompt: "Analyze the auth module",
 	state: { files: globalThis.authFiles },
 	tools: "read-only",
 	budget: "medium",
+	model: "openai-codex/gpt-5.4-mini",
 });
 ```
 

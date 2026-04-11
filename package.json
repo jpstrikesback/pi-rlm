@@ -34,6 +34,7 @@
 	"files": [
 		"dist",
 		"assets",
+		"rlm-profiles.json",
 		"README.md",
 		"LICENSE"
 	],
@@ -63,8 +64,8 @@
 		"@sinclair/typebox": "*"
 	},
 	"devDependencies": {
-		"@mariozechner/pi-agent-core": "^0.65.0",
-		"@mariozechner/pi-coding-agent": "^0.65.0",
+		"@mariozechner/pi-agent-core": "^0.66.1",
+		"@mariozechner/pi-coding-agent": "^0.66.1",
 		"@sinclair/typebox": "^0.34.41",
 		"prettier": "^3.8.1",
 		"tsx": "^4.21.0",
